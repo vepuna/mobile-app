@@ -1,6 +1,4 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system';
 import { LinearGradient } from 'expo-linear-gradient';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
@@ -33,7 +31,6 @@ import {
   formatMonthYear,
   formatShortDate,
   isValidLessonDraft,
-  moveLessonByDays,
   parseLessonStart,
   sortLessons,
 } from './src/domain/selectors';
@@ -43,7 +40,6 @@ import {
   type AppData,
   type AppLanguage,
   type AppSettings,
-  type FileItem,
   type Lesson,
   type LessonDraft,
   type Payment,
@@ -70,6 +66,7 @@ const RECURRENCE_PRESETS = [
   { key: 'weekdays', label: 'Каждый будний день', weekdays: [1, 2, 3, 4, 5], everyWeeks: 1 },
   { key: 'biweekly', label: 'Раз в две недели (выбранные дни)', weekdays: [], everyWeeks: 2 },
 ] as const;
+const STUDENT_MARKER_COLORS = ['#2667ff', '#ff7a59', '#1fa774', '#9a4dff', '#eb5757', '#f0a202', '#0ea5a0', '#7c4d2b'];
 
 type PaymentStatus = 'paid' | 'partial' | 'outstanding';
 
@@ -80,8 +77,6 @@ type RecurrenceDraft = {
   weeksCount: number;
   startDate: string;
 };
-
-type SeriesRescheduleMode = 'single' | 'future';
 
 function toDateToken(date: Date): string {
   const year = date.getFullYear();
@@ -183,8 +178,10 @@ export default function App() {
   const [studentModalOpen, setStudentModalOpen] = useState(false);
   const [lessonModalOpen, setLessonModalOpen] = useState(false);
   const [paymentModalOpen, setPaymentModalOpen] = useState(false);
+  const [dayLessonsModalOpen, setDayLessonsModalOpen] = useState(false);
   const [editingStudentId, setEditingStudentId] = useState<string | null>(null);
   const [editingLessonId, setEditingLessonId] = useState<string | null>(null);
+  const [editingPaymentId, setEditingPaymentId] = useState<string | null>(null);
   const [selectedFinanceStudentId, setSelectedFinanceStudentId] = useState<string | null>(null);
   const [calendarMonth, setCalendarMonth] = useState<Date>(() => monthStart(new Date()));
   const [selectedCalendarDate, setSelectedCalendarDate] = useState<string>(() => toDateToken(new Date()));
@@ -201,9 +198,6 @@ export default function App() {
   const [lessonDatePickerTarget, setLessonDatePickerTarget] = useState<'lesson' | 'recurrence'>('lesson');
   const [paymentDatePickerOpen, setPaymentDatePickerOpen] = useState(false);
   const [paymentDatePickerMonth, setPaymentDatePickerMonth] = useState<Date>(() => monthStart(new Date()));
-  const [rescheduleMode, setRescheduleMode] = useState<SeriesRescheduleMode>('single');
-  const [newFolderName, setNewFolderName] = useState('');
-  const [selectedFolder, setSelectedFolder] = useState('Общее');
   const [automationStatus, setAutomationStatus] = useState(initialAutomationStatus);
 
   useEffect(() => {
@@ -218,7 +212,6 @@ export default function App() {
             students: parsed.students ?? seedAppData.students,
             lessons: parsed.lessons ?? seedAppData.lessons,
             payments: parsed.payments ?? seedAppData.payments,
-            files: parsed.files ?? seedAppData.files,
             settings: {
               ...seedAppData.settings,
               ...(parsed.settings ?? {}),
@@ -275,7 +268,13 @@ export default function App() {
     () => Object.fromEntries(data.students.map((student) => [student.id, student] as const)),
     [data.students],
   );
-  const sortedLessons = useMemo(() => sortLessons(data.lessons), [data.lessons]);
+  const studentColorById = useMemo(
+    () =>
+      Object.fromEntries(
+        data.students.map((student, index) => [student.id, STUDENT_MARKER_COLORS[index % STUDENT_MARKER_COLORS.length]]),
+      ),
+    [data.students],
+  );
   const dashboard = useMemo(() => deriveDashboard(data, new Date()), [data]);
   const languageOptions: AppLanguage[] = ['ru-RU'];
   const currencyOptions: AppCurrency[] = ['MDL'];
@@ -395,8 +394,11 @@ export default function App() {
             lesson.status === 'done' ? overview?.lessonCoverage?.get(lesson.id) ?? 'outstanding' : 'outstanding';
           return {
             key: `${lesson.id}-${studentId}`,
+            lessonId: lesson.id,
+            lessonTitle: lesson.title,
             studentId,
             studentName: studentsById[studentId]?.name ?? 'Неизвестный ученик',
+            markerColor: studentColorById[studentId] ?? '#6b8293',
             lessonTime: new Intl.DateTimeFormat('ru-RU', {
               hour: '2-digit',
               minute: '2-digit',
@@ -406,7 +408,7 @@ export default function App() {
           };
         }),
       ),
-    [selectedDayLessons, studentPaymentOverview, studentsById],
+    [selectedDayLessons, studentColorById, studentPaymentOverview, studentsById],
   );
   const todayDateToken = toDateToken(new Date());
   const todayLessons = useMemo(
@@ -503,7 +505,6 @@ export default function App() {
       status: lessonDraft.status,
       studentIds: lessonDraft.studentIds,
       note: lessonDraft.note.trim(),
-      attachmentIds: lessonDraft.attachmentIds,
       recurrenceId: null,
       recurrenceEveryWeeks: null,
       recurrenceWeekdays: null,
@@ -587,27 +588,58 @@ export default function App() {
     closeLessonModal();
   };
 
-  const addPayment = () => {
+  const upsertPayment = () => {
     if (!paymentDraft.studentId || !paymentDraft.amount) {
       Alert.alert('Данные платежа неполные', 'Выберите ученика и укажите сумму платежа.');
       return;
     }
 
+    const amount = Number(paymentDraft.amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      Alert.alert('Некорректная сумма', 'Введите сумму больше нуля.');
+      return;
+    }
+
     const nextPayment: Payment = {
-      id: `payment-${Date.now()}`,
+      id: editingPaymentId ?? `payment-${Date.now()}`,
       studentId: paymentDraft.studentId,
-      amount: Number(paymentDraft.amount) || 0,
+      amount,
       paidAt: paymentDraft.paidAt || toDateToken(new Date()),
-      kind: 'payment',
+      kind: paymentDraft.kind,
       note: paymentDraft.note.trim(),
     };
 
-    setData((current) => ({
-      ...current,
-      payments: [nextPayment, ...current.payments],
-    }));
+    setData((current) => {
+      const payments = editingPaymentId
+        ? current.payments.map((payment) => (payment.id === editingPaymentId ? nextPayment : payment))
+        : [nextPayment, ...current.payments];
+      return {
+        ...current,
+        payments,
+      };
+    });
 
     closePaymentModal();
+  };
+
+  const deletePayment = (paymentId: string) => {
+    Alert.alert('Удалить оплату?', 'Действие нельзя отменить. Баланс и статистика будут пересчитаны.', [
+      { text: 'Отмена', style: 'cancel' },
+      {
+        text: 'Удалить',
+        style: 'destructive',
+        onPress: () => {
+          setData((current) => ({
+            ...current,
+            payments: current.payments.filter((payment) => payment.id !== paymentId),
+          }));
+
+          if (editingPaymentId === paymentId) {
+            closePaymentModal();
+          }
+        },
+      },
+    ]);
   };
 
   const addQuickPayment = (studentId: string) => {
@@ -632,54 +664,6 @@ export default function App() {
       payments: [nextPayment, ...current.payments],
     }));
     setQuickPaymentDrafts((current) => ({ ...current, [studentId]: '' }));
-  };
-
-  const createFolder = () => {
-    const folderName = newFolderName.trim();
-    if (!folderName) {
-      return;
-    }
-
-    setSelectedFolder(folderName);
-    setNewFolderName('');
-  };
-
-  const importFile = async () => {
-    const result = await DocumentPicker.getDocumentAsync({
-      copyToCacheDirectory: true,
-      multiple: false,
-    });
-
-    if (result.canceled) {
-      return;
-    }
-
-    const [asset] = result.assets;
-    const baseDirectory = FileSystem.Paths.join(FileSystem.Paths.document, 'tutor-files', selectedFolder);
-
-    try {
-      const folderInfo = await FileSystem.getInfoAsync(baseDirectory);
-      if (!folderInfo.exists) {
-        await FileSystem.makeDirectoryAsync(baseDirectory, { intermediates: true });
-      }
-
-      const targetUri = `${baseDirectory}/${Date.now()}-${asset.name}`;
-      await FileSystem.copyAsync({ from: asset.uri, to: targetUri });
-
-      const nextFile: FileItem = {
-        id: `file-${Date.now()}`,
-        name: asset.name,
-        folder: selectedFolder,
-        uri: targetUri,
-        size: asset.size ?? 0,
-        createdAt: new Date().toISOString(),
-      };
-
-      setData((current) => ({ ...current, files: [nextFile, ...current.files] }));
-    } catch (error) {
-      Alert.alert('Ошибка импорта', 'Не удалось скопировать файл во внутреннее хранилище приложения.');
-      console.warn('Не удалось импортировать файл', error);
-    }
   };
 
   const openStudentEditor = (student?: Student) => {
@@ -718,7 +702,6 @@ export default function App() {
         studentIds: lesson.studentIds,
         note: lesson.note,
         status: lesson.status,
-        attachmentIds: lesson.attachmentIds,
       });
       setRecurrenceDraft({
         enabled: Boolean(lesson.recurrenceId),
@@ -744,13 +727,24 @@ export default function App() {
     setLessonModalOpen(true);
   };
 
-  const openPaymentEditor = (studentId?: string) => {
-    const paidAt = toDateToken(new Date());
-    setPaymentDraft({
-      ...createEmptyPaymentDraft(),
-      studentId: studentId ?? selectedFinanceStudentId ?? data.students[0]?.id ?? '',
-      paidAt,
-    });
+  const openPaymentEditor = (studentId?: string, payment?: Payment) => {
+    const paidAt = payment?.paidAt ?? toDateToken(new Date());
+    setEditingPaymentId(payment?.id ?? null);
+    setPaymentDraft(
+      payment
+        ? {
+            studentId: payment.studentId,
+            amount: String(payment.amount),
+            paidAt: payment.paidAt,
+            kind: payment.kind,
+            note: payment.note,
+          }
+        : {
+            ...createEmptyPaymentDraft(),
+            studentId: studentId ?? selectedFinanceStudentId ?? data.students[0]?.id ?? '',
+            paidAt,
+          },
+    );
     setPaymentDatePickerMonth(monthStart(new Date(`${paidAt}T00:00:00`)));
     setPaymentModalOpen(true);
   };
@@ -776,6 +770,7 @@ export default function App() {
 
   const closePaymentModal = () => {
     setPaymentModalOpen(false);
+    setEditingPaymentId(null);
     setPaymentDraft(createEmptyPaymentDraft());
   };
 
@@ -807,60 +802,6 @@ export default function App() {
     });
   };
 
-  const transferLesson = (lessonId: string, dayShift: number) => {
-    setData((current) => {
-      const lesson = current.lessons.find((item) => item.id === lessonId);
-      if (!lesson) {
-        return current;
-      }
-
-      const moved = moveLessonByDays(lesson, dayShift);
-      if (rescheduleMode === 'single' || !lesson.recurrenceId) {
-        if (hasTimeslotConflict(current.lessons, moved.startAt, lesson.id, null)) {
-          Alert.alert('Перенос невозможен', 'На выбранное время уже есть другой урок.');
-          return current;
-        }
-
-        return {
-          ...current,
-          lessons: current.lessons.map((item) => (item.id === lessonId ? moved : item)),
-        };
-      }
-
-      const anchorDate = lesson.startAt.slice(0, 10);
-      const seriesLessons = sortLessons(
-        current.lessons.filter(
-          (item) => item.recurrenceId === lesson.recurrenceId && item.startAt.slice(0, 10) >= anchorDate,
-        ),
-      );
-      const updatedLessons = [...current.lessons];
-
-      for (const seriesLesson of seriesLessons) {
-        const shifted = moveLessonByDays(seriesLesson, dayShift);
-        const conflict = hasTimeslotConflict(
-          updatedLessons,
-          shifted.startAt,
-          seriesLesson.id,
-          lesson.recurrenceId,
-        );
-        if (conflict) {
-          Alert.alert('Перенос серии невозможен', 'Один из будущих уроков конфликтует по времени.');
-          return current;
-        }
-      }
-
-      return {
-        ...current,
-        lessons: current.lessons.map((item) => {
-          if (item.recurrenceId === lesson.recurrenceId && item.startAt.slice(0, 10) >= anchorDate) {
-            return moveLessonByDays(item, dayShift);
-          }
-          return item;
-        }),
-      };
-    });
-  };
-
   const toggleStudentArchive = (studentId: string) => {
     setData((current) => ({
       ...current,
@@ -869,10 +810,6 @@ export default function App() {
       ),
     }));
   };
-
-  const folderOptions = Array.from(
-    new Set(['Общее', ...data.files.map((file) => file.folder), selectedFolder]),
-  );
 
   const updateSettings = (patch: Partial<AppSettings>) => {
     setData((current) => ({
@@ -897,7 +834,6 @@ export default function App() {
     schedule: 'Календарь',
     students: 'Ученики',
     finances: 'Оплаты',
-    files: 'Файлы',
     settings: 'Настройки',
   };
 
@@ -914,7 +850,7 @@ export default function App() {
 
       <View style={styles.shell}>
         <View style={styles.tabBar}>
-          {(['dashboard', 'schedule', 'students', 'finances', 'files', 'settings'] as ScreenTab[]).map((tab) => (
+          {(['dashboard', 'schedule', 'students', 'finances', 'settings'] as ScreenTab[]).map((tab) => (
             <Pressable
               key={tab}
               onPress={() => setActiveTab(tab)}
@@ -1010,7 +946,6 @@ export default function App() {
                     onEdit={() => openLessonEditor(lesson)}
                     onStatusChange={updateLessonStatus}
                     onDuplicate={duplicateLesson}
-                    onTransfer={transferLesson}
                   />
                 ))}
               </SectionCard>
@@ -1089,30 +1024,12 @@ export default function App() {
             <>
               <ActionHeader
                 title="Расписание занятий"
-                subtitle="Полный месячный календарь с индикаторами загруженности по дням."
+                subtitle="Выбирайте день и сразу открывайте занятия в отдельном окне."
                 actionLabel="Добавить урок"
                 onAction={() => openLessonEditor()}
               />
 
-              <SectionCard
-                title="Режим переноса"
-                subtitle="Временный перенос двигает только выбранный урок, постоянный перенос меняет серию с выбранной даты."
-              >
-                <View style={styles.chipWrap}>
-                  <Pill
-                    label="Только этот урок"
-                    selected={rescheduleMode === 'single'}
-                    onPress={() => setRescheduleMode('single')}
-                  />
-                  <Pill
-                    label="Эта и будущие даты"
-                    selected={rescheduleMode === 'future'}
-                    onPress={() => setRescheduleMode('future')}
-                  />
-                </View>
-              </SectionCard>
-
-              <SectionCard title="Календарь на месяц" subtitle="Нажмите день, чтобы увидеть список учеников и статусы оплаты.">
+              <SectionCard title="Календарь на месяц" subtitle="Нажмите день, чтобы открыть список уроков и статусов оплаты.">
                 <View style={styles.calendarMonthHeader}>
                   <SmallAction
                     label="← Месяц"
@@ -1141,6 +1058,7 @@ export default function App() {
                   {monthGridDays.map((gridDay) => {
                     const dateToken = toDateToken(gridDay);
                     const dayLessons = lessonsByDate[dateToken] ?? [];
+                    const dayStudentMarkers = Array.from(new Set(dayLessons.flatMap((lesson) => lesson.studentIds)));
                     const isCurrentMonth = gridDay.getMonth() === calendarMonth.getMonth();
                     const isSelected = selectedCalendarDate === dateToken;
                     const isToday = dateToken === toDateToken(new Date());
@@ -1158,6 +1076,7 @@ export default function App() {
                           if (!isCurrentMonth) {
                             setCalendarMonth(monthStart(gridDay));
                           }
+                          setDayLessonsModalOpen(true);
                         }}
                       >
                         <Text
@@ -1170,74 +1089,21 @@ export default function App() {
                           {gridDay.getDate()}
                         </Text>
                         <View style={styles.calendarDotsRow}>
-                          {dayLessons.slice(0, 4).map((lesson) => (
+                          {dayStudentMarkers.slice(0, 6).map((studentId) => (
                             <View
-                              key={lesson.id}
+                              key={`${dateToken}-${studentId}`}
                               style={[
                                 styles.calendarDot,
-                                lesson.status === 'missed'
-                                  ? styles.calendarDotMissed
-                                  : lesson.status === 'done'
-                                  ? styles.calendarDotDone
-                                  : styles.calendarDotPlanned,
+                                { backgroundColor: studentColorById[studentId] ?? '#6b8293' },
                               ]}
                             />
                           ))}
-                          {dayLessons.length > 4 ? <Text style={styles.calendarMore}>+{dayLessons.length - 4}</Text> : null}
+                          {dayStudentMarkers.length > 6 ? <Text style={styles.calendarMore}>+{dayStudentMarkers.length - 6}</Text> : null}
                         </View>
                       </Pressable>
                     );
                   })}
                 </View>
-              </SectionCard>
-
-              <SectionCard
-                title={`Ученики на ${formatShortDate(`${selectedCalendarDate}T00:00:00`, 'ru-RU')}`}
-                subtitle="Имя, время урока и статус оплаты доступны без переходов между экранами."
-              >
-                {selectedDayStudentEntries.length === 0 ? (
-                  <Text style={styles.noteText}>На выбранную дату уроков нет.</Text>
-                ) : (
-                  selectedDayStudentEntries.map((entry) => (
-                    <View key={entry.key} style={styles.paymentRow}>
-                      <View>
-                        <Text style={styles.financeName}>{entry.studentName}</Text>
-                        <Text style={styles.financeMeta}>Урок в {entry.lessonTime}</Text>
-                      </View>
-                      <Text
-                        style={[
-                          styles.statusBadge,
-                          entry.status === 'paid'
-                            ? styles.statusPaid
-                            : entry.status === 'partial'
-                            ? styles.statusPartial
-                            : styles.statusOutstanding,
-                        ]}
-                      >
-                        {entry.status === 'paid' ? 'Оплачено' : entry.status === 'partial' ? 'Частично оплачено' : 'Есть долг'}
-                      </Text>
-                    </View>
-                  ))
-                )}
-              </SectionCard>
-
-              <SectionCard
-                title="Список уроков"
-                subtitle="Групповые занятия, переносы и дублирование на следующую неделю."
-              >
-                {sortedLessons.map((lesson) => (
-                  <LessonCard
-                    key={lesson.id}
-                    lesson={lesson}
-                    studentsById={studentsById}
-                    language={data.settings.language}
-                    currencyFormatter={currencyFormatter}
-                    onEdit={() => openLessonEditor(lesson)}
-                    onStatusChange={updateLessonStatus}
-                    onDuplicate={duplicateLesson}
-                    onTransfer={transferLesson}
-                  />
-                ))}
               </SectionCard>
             </>
           ) : null}
@@ -1421,53 +1287,13 @@ export default function App() {
                         {formatPaymentKindLabel(payment.kind)} • {formatShortDate(payment.paidAt, 'ru-RU')}
                       </Text>
                     </View>
-                    <Text style={styles.paymentAmount}>{formatCurrency(payment.amount, currencyFormatter)}</Text>
-                  </View>
-                ))}
-              </SectionCard>
-            </>
-          ) : null}
-
-          {activeTab === 'files' ? (
-            <>
-              <ActionHeader
-                title="Файлы"
-                subtitle="Материалы занятий в папках с быстрым доступом."
-                actionLabel="Загрузить файл"
-                onAction={() => {
-                  void importFile();
-                }}
-              />
-              <SectionCard title="Папки" subtitle="Выберите папку, куда сохранять новые материалы.">
-                <Field
-                  label="Новая папка"
-                  value={newFolderName}
-                  onChangeText={setNewFolderName}
-                  placeholder="Практика речи"
-                />
-                <SmallAction label="Создать папку" onPress={createFolder} />
-                <View style={styles.chipWrap}>
-                  {folderOptions.map((folder) => (
-                    <Pill
-                      key={folder}
-                      label={folder}
-                      selected={selectedFolder === folder}
-                      onPress={() => setSelectedFolder(folder)}
-                    />
-                  ))}
-                </View>
-              </SectionCard>
-
-              <SectionCard title="Библиотека" subtitle="Все загруженные файлы хранятся локально в приложении.">
-                {data.files.map((file) => (
-                  <View key={file.id} style={styles.fileRow}>
-                    <View style={styles.fileMetaBlock}>
-                      <Text style={styles.financeName}>{file.name}</Text>
-                      <Text style={styles.financeMeta}>
-                        {file.folder} • {Math.max(1, Math.round(file.size / 1024))} КБ
-                      </Text>
+                    <View style={styles.paymentActions}>
+                      <Text style={styles.paymentAmount}>{formatCurrency(payment.amount, currencyFormatter)}</Text>
+                      <View style={styles.inlineActions}>
+                        <SmallAction label="Изменить" onPress={() => openPaymentEditor(undefined, payment)} />
+                        <SmallAction label="Удалить" onPress={() => deletePayment(payment.id)} />
+                      </View>
                     </View>
-                    <Text style={styles.fileDate}>{formatShortDate(file.createdAt, data.settings.language)}</Text>
                   </View>
                 ))}
               </SectionCard>
@@ -1644,27 +1470,6 @@ export default function App() {
                 );
               })}
           </View>
-            <Text style={styles.selectorTitle}>Прикрепить материалы</Text>
-          <View style={styles.chipWrap}>
-            {data.files.map((file) => {
-              const selected = lessonDraft.attachmentIds.includes(file.id);
-              return (
-                <Pill
-                  key={file.id}
-                  label={file.name}
-                  selected={selected}
-                  onPress={() =>
-                    setLessonDraft((current) => ({
-                      ...current,
-                      attachmentIds: selected
-                        ? current.attachmentIds.filter((id) => id !== file.id)
-                        : [...current.attachmentIds, file.id],
-                    }))
-                  }
-                />
-              );
-            })}
-          </View>
           <Text style={[styles.conflictText, lessonConflicts.length === 0 ? styles.freeTimeText : styles.busyTimeText]}>
             {lessonConflicts.length === 0
               ? 'Выбранное время свободно.'
@@ -1790,7 +1595,7 @@ export default function App() {
       </Modal>
 
       <Modal visible={paymentModalOpen} animationType="slide" transparent onRequestClose={closePaymentModal}>
-        <ModalCard title="Добавить оплату" onClose={closePaymentModal}>
+        <ModalCard title={editingPaymentId ? 'Редактировать оплату' : 'Добавить оплату'} onClose={closePaymentModal}>
           <Text style={styles.selectorTitle}>Ученик</Text>
           <View style={styles.chipWrap}>
             {data.students.map((student) => (
@@ -1809,12 +1614,71 @@ export default function App() {
             placeholder="120"
             keyboardType="numeric"
           />
+          <Text style={styles.selectorTitle}>Тип оплаты</Text>
+          <View style={styles.chipWrap}>
+            {(['payment', 'prepayment'] as Payment['kind'][]).map((kind) => (
+              <Pill
+                key={kind}
+                label={formatPaymentKindLabel(kind)}
+                selected={paymentDraft.kind === kind}
+                onPress={() => setPaymentDraft((current) => ({ ...current, kind }))}
+              />
+            ))}
+          </View>
           <DateFieldButton
             label="Дата"
             value={formatShortDate(`${paymentDraft.paidAt}T00:00:00`, 'ru-RU')}
             onPress={() => setPaymentDatePickerOpen(true)}
           />
-          <PrimaryButton label="Сохранить оплату" onPress={addPayment} />
+          <TextArea
+            label="Комментарий"
+            value={paymentDraft.note}
+            onChangeText={(value) => setPaymentDraft((current) => ({ ...current, note: value }))}
+            placeholder="Назначение платежа"
+          />
+          <PrimaryButton label="Сохранить оплату" onPress={upsertPayment} />
+        </ModalCard>
+      </Modal>
+
+      <Modal
+        visible={dayLessonsModalOpen}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setDayLessonsModalOpen(false)}
+      >
+        <ModalCard
+          title={`Уроки на ${formatShortDate(`${selectedCalendarDate}T00:00:00`, 'ru-RU')}`}
+          onClose={() => setDayLessonsModalOpen(false)}
+        >
+          {selectedDayStudentEntries.length === 0 ? (
+            <Text style={styles.noteText}>На выбранную дату уроков нет.</Text>
+          ) : (
+            selectedDayStudentEntries.map((entry) => (
+              <View key={entry.key} style={styles.paymentRow}>
+                <View>
+                  <View style={styles.calendarLessonTitleRow}>
+                    <View style={[styles.calendarDot, { backgroundColor: entry.markerColor }]} />
+                    <Text style={styles.financeName}>{entry.studentName}</Text>
+                  </View>
+                  <Text style={styles.financeMeta}>
+                    {entry.lessonTitle} • {entry.lessonTime}
+                  </Text>
+                </View>
+                <Text
+                  style={[
+                    styles.statusBadge,
+                    entry.status === 'paid'
+                      ? styles.statusPaid
+                      : entry.status === 'partial'
+                      ? styles.statusPartial
+                      : styles.statusOutstanding,
+                  ]}
+                >
+                  {entry.status === 'paid' ? 'Оплачено' : entry.status === 'partial' ? 'Частично оплачено' : 'Есть долг'}
+                </Text>
+              </View>
+            ))
+          )}
         </ModalCard>
       </Modal>
 
@@ -1987,7 +1851,6 @@ function LessonCard({
   onEdit,
   onStatusChange,
   onDuplicate,
-  onTransfer,
 }: {
   lesson: Lesson;
   studentsById: Record<string, Student>;
@@ -1996,7 +1859,6 @@ function LessonCard({
   onEdit: () => void;
   onStatusChange: (lessonId: string, status: Lesson['status']) => void;
   onDuplicate: (lessonId: string) => void;
-  onTransfer: (lessonId: string, dayShift: number) => void;
 }) {
   const attendeeNames = lesson.studentIds
     .map((studentId) => studentsById[studentId]?.name)
@@ -2012,8 +1874,7 @@ function LessonCard({
             {formatLessonDate(lesson.startAt, language)} • {attendeeNames || 'Ученики не выбраны'}
           </Text>
           <Text style={styles.lessonMeta}>
-            {lesson.durationMinutes} мин • {formatCurrency(lesson.costPerStudent, currencyFormatter)} за ученика •{' '}
-            {lesson.attachmentIds.length} файлов
+            {lesson.durationMinutes} мин • {formatCurrency(lesson.costPerStudent, currencyFormatter)} за ученика
           </Text>
         </View>
         <Pressable onPress={onEdit} style={styles.editButton}>
@@ -2032,8 +1893,6 @@ function LessonCard({
       </View>
       <View style={styles.inlineActions}>
         <SmallAction label="Дублировать на +1 неделю" onPress={() => onDuplicate(lesson.id)} />
-        <SmallAction label="Сместить на +1 день" onPress={() => onTransfer(lesson.id, 1)} />
-        <SmallAction label="Сместить на -1 день" onPress={() => onTransfer(lesson.id, -1)} />
       </View>
     </View>
   );
@@ -2582,9 +2441,18 @@ const styles = StyleSheet.create({
     color: '#123c69',
     fontWeight: '800',
   },
+  paymentActions: {
+    alignItems: 'flex-end',
+    gap: 8,
+  },
   todayLessonStatusWrap: {
     alignItems: 'flex-end',
     gap: 4,
+  },
+  calendarLessonTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
   },
   recurrencePanel: {
     backgroundColor: '#f4f8fc',

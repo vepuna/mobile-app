@@ -1,4 +1,4 @@
-export type ScreenTab = 'dashboard' | 'schedule' | 'students' | 'finances' | 'files' | 'settings';
+export type ScreenTab = 'dashboard' | 'schedule' | 'students' | 'finances' | 'settings';
 
 export type AppLanguage = 'en-US' | 'ru-RU';
 export type AppCurrency = 'USD' | 'EUR' | 'RUB' | 'MDL';
@@ -30,7 +30,6 @@ export type Lesson = {
   status: LessonStatus;
   studentIds: string[];
   note: string;
-  attachmentIds: string[];
   recurrenceId?: string | null;
   recurrenceEveryWeeks?: number | null;
   recurrenceWeekdays?: number[] | null;
@@ -46,20 +45,10 @@ export type Payment = {
   note: string;
 };
 
-export type FileItem = {
-  id: string;
-  name: string;
-  folder: string;
-  uri: string;
-  size: number;
-  createdAt: string;
-};
-
 export type AppData = {
   students: Student[];
   lessons: Lesson[];
   payments: Payment[];
-  files: FileItem[];
   settings: AppSettings;
 };
 
@@ -102,7 +91,6 @@ export type LessonDraft = {
   status: LessonStatus;
   studentIds: string[];
   note: string;
-  attachmentIds: string[];
 };
 
 export type PaymentDraft = {

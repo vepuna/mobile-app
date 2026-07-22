@@ -50,13 +50,6 @@ export function createNextWeekLesson(lesson: Lesson): Lesson {
   };
 }
 
-export function moveLessonByDays(lesson: Lesson, dayShift: number): Lesson {
-  return {
-    ...lesson,
-    startAt: moveDateIsoByDays(lesson.startAt, dayShift),
-  };
-}
-
 export function moveDateIsoByDays(isoValue: string, dayShift: number): string {
   const nextDate = new Date(isoValue);
   nextDate.setDate(nextDate.getDate() + dayShift);

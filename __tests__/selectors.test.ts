@@ -47,7 +47,6 @@ const testData: AppData = {
       status: 'planned',
       studentIds: ['student-maria'],
       note: '',
-      attachmentIds: [],
     },
     {
       id: 'lesson-2',
@@ -58,7 +57,6 @@ const testData: AppData = {
       status: 'done',
       studentIds: ['student-alex'],
       note: '',
-      attachmentIds: [],
     },
     {
       id: 'lesson-3',
@@ -69,7 +67,6 @@ const testData: AppData = {
       status: 'missed',
       studentIds: ['student-maria', 'student-alex'],
       note: '',
-      attachmentIds: [],
     },
   ],
   payments: [
@@ -90,7 +87,6 @@ const testData: AppData = {
       note: '',
     },
   ],
-  files: [],
   settings: {
     language: 'en-US',
     currency: 'USD',
@@ -128,7 +124,6 @@ describe('tutor domain selectors', () => {
         status: 'planned',
         studentIds: ['student-alex'],
         note: '',
-        attachmentIds: [],
       },
       testData.lessons,
       null,

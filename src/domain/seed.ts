@@ -6,7 +6,6 @@ export const seedAppData: AppData = {
   students: [],
   lessons: [],
   payments: [],
-  files: [],
   settings: {
     language: 'ru-RU',
     currency: 'MDL',
@@ -42,7 +41,6 @@ export function createEmptyLessonDraft(): LessonDraft {
     status: 'planned',
     studentIds: [],
     note: '',
-    attachmentIds: [],
   };
 }
 
