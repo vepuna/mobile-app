@@ -133,6 +133,25 @@ describe('tutor domain selectors', () => {
     expect(conflicts).toHaveLength(1);
   });
 
+  it('frees a rescheduled lesson original slot for a new lesson', () => {
+    const rescheduledLesson = { ...testData.lessons[0], status: 'rescheduled' as const };
+    const conflicts = findLessonConflicts(
+      {
+        title: 'Replacement lesson',
+        lessonDate: '2026-06-26',
+        lessonTime: '16:00',
+        durationMinutes: '60',
+        status: 'scheduled',
+        studentIds: [],
+        note: '',
+      },
+      [rescheduledLesson],
+      null,
+    );
+
+    expect(conflicts).toHaveLength(0);
+  });
+
   it('summarizes dashboard metrics for the current month', () => {
     const dashboard = deriveDashboard(testData, new Date('2026-06-26T08:00:00.000Z'));
 

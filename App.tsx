@@ -334,6 +334,10 @@ export default function App() {
       ),
     [activeStudentIds, data.lessons],
   );
+  const scheduledLessons = useMemo(
+    () => activeLessons.filter((lesson) => lesson.status !== 'rescheduled'),
+    [activeLessons],
+  );
   const studentColorById = useMemo(
     () =>
       Object.fromEntries(
@@ -371,18 +375,18 @@ export default function App() {
     .sort((left, right) => right.paidAt.localeCompare(left.paidAt));
   const filteredIncome = filteredPayments.reduce((total, payment) => total + payment.amount, 0);
   const lessonConflicts = useMemo(
-    () => findLessonConflicts(lessonDraft, activeLessons, editingLessonId),
-    [activeLessons, editingLessonId, lessonDraft],
+    () => findLessonConflicts(lessonDraft, scheduledLessons, editingLessonId),
+    [editingLessonId, lessonDraft, scheduledLessons],
   );
   const lessonsByDate = useMemo(
     () =>
-      activeLessons.reduce<Record<string, Lesson[]>>((acc, lesson) => {
+      scheduledLessons.reduce<Record<string, Lesson[]>>((acc, lesson) => {
         const dateToken = lesson.startAt.slice(0, 10);
         const list = acc[dateToken] ?? [];
         acc[dateToken] = [...list, lesson];
         return acc;
       }, {}),
-    [activeLessons],
+    [scheduledLessons],
   );
   const monthGridDays = useMemo(() => createMonthGrid(calendarMonth), [calendarMonth]);
   const selectedDayLessons = useMemo(
@@ -557,7 +561,7 @@ export default function App() {
       recurrenceStartDate: null,
     };
 
-    if (hasTimeslotConflict(activeLessons, nextLesson.startAt, editingLessonId, null)) {
+    if (hasTimeslotConflict(scheduledLessons, nextLesson.startAt, editingLessonId, null)) {
       Alert.alert('Слот уже занят', 'На это время уже запланирован другой урок. Выберите другое время.');
       return;
     }
@@ -584,7 +588,7 @@ export default function App() {
           continue;
         }
         const conflict = hasTimeslotConflict(
-          activeLessons,
+          scheduledLessons,
           recurringStart,
           editingLessonId,
           editingLessonId ? recurrenceId : null,
@@ -858,7 +862,7 @@ export default function App() {
       Alert.alert('Некорректные дата или время', 'Используйте форматы YYYY-MM-DD и HH:mm.');
       return;
     }
-    if (hasTimeslotConflict(activeLessons, startAt, originalLesson.id, null)) {
+    if (hasTimeslotConflict(scheduledLessons, startAt, originalLesson.id, null)) {
       Alert.alert('Слот уже занят', 'На выбранное время уже назначен другой урок.');
       return;
     }
@@ -1207,6 +1211,30 @@ export default function App() {
                     <Text style={styles.calendarLegendText}>Резерв без ученика</Text>
                   </View>
                 </View>
+              </SectionCard>
+
+              <SectionCard
+                title="Уроки выбранного дня"
+                subtitle={formatShortDate(`${selectedCalendarDate}T00:00:00`, 'ru-RU')}
+              >
+                {selectedDayLessons.length === 0 ? (
+                  <Text style={styles.noteText}>На выбранный день уроков нет.</Text>
+                ) : (
+                  selectedDayLessons.map((lesson) => (
+                    <ScheduleLessonCard
+                      key={`selected-${lesson.id}`}
+                      lesson={lesson}
+                      student={lesson.studentIds[0] ? studentsById[lesson.studentIds[0]] : undefined}
+                      statusMenuOpen={statusMenuLessonId === lesson.id}
+                      onToggleStatus={() =>
+                        setStatusMenuLessonId((current) => (current === lesson.id ? null : lesson.id))
+                      }
+                      onStatusChange={(status) => handleQuickLessonStatusChange(lesson, status)}
+                      onEdit={() => openLessonEditor(lesson)}
+                      onDelete={() => deleteLesson(lesson.id)}
+                    />
+                  ))
+                )}
               </SectionCard>
             </>
           ) : null}
@@ -1766,71 +1794,28 @@ export default function App() {
                         <Text style={styles.dayScheduleEmptyText}>Свободно</Text>
                       </Pressable>
                     ) : (
-                      hourLessons.map((lesson) => {
-                        const student = lesson.studentIds[0] ? studentsById[lesson.studentIds[0]] : undefined;
-                        const time = new Intl.DateTimeFormat('ru-RU', {
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        }).format(new Date(lesson.startAt));
-
-                        return (
-                          <View
-                            key={lesson.id}
-                            style={[styles.dayScheduleLesson, { borderColor: student?.color ?? ANONYMOUS_LESSON_COLOR }]}
-                          >
-                            <Pressable
-                              onPress={() => {
-                                setDayLessonsModalOpen(false);
-                                openLessonEditor(lesson);
-                              }}
-                              style={styles.dayScheduleLessonMain}
-                            >
-                              <Text style={styles.dayScheduleLessonTitle}>{lesson.title}</Text>
-                              <Text style={styles.dayScheduleLessonMeta}>
-                                {time} · {lesson.durationMinutes} мин · {student?.name ?? 'Резерв без ученика'}
-                              </Text>
-                              <Text
-                                style={[
-                                  styles.dayScheduleStatus,
-                                  lesson.status === 'completed' && styles.dayScheduleStatusCompleted,
-                                  lesson.status === 'cancelled' && styles.dayScheduleStatusCancelled,
-                                  lesson.status === 'rescheduled' && styles.dayScheduleStatusRescheduled,
-                                ]}
-                              >
-                                {formatLessonStatusLabel(lesson.status)}
-                              </Text>
-                            </Pressable>
-                            <View style={styles.dayScheduleActions}>
-                              <SmallAction
-                                label="Статус"
-                                onPress={() =>
-                                  setStatusMenuLessonId((current) => (current === lesson.id ? null : lesson.id))
-                                }
-                              />
-                              <SmallAction
-                                label="Изменить"
-                                onPress={() => {
-                                  setDayLessonsModalOpen(false);
-                                  openLessonEditor(lesson);
-                                }}
-                              />
-                              <SmallAction label="Удалить" onPress={() => deleteLesson(lesson.id)} />
-                            </View>
-                            {statusMenuLessonId === lesson.id ? (
-                              <View style={styles.dayScheduleStatusMenu}>
-                                {(['scheduled', 'completed', 'cancelled', 'rescheduled'] as Lesson['status'][]).map((status) => (
-                                  <Pill
-                                    key={status}
-                                    label={formatLessonStatusLabel(status)}
-                                    selected={lesson.status === status}
-                                    onPress={() => handleQuickLessonStatusChange(lesson, status)}
-                                  />
-                                ))}
-                              </View>
-                            ) : null}
-                          </View>
-                        );
-                      })
+                      hourLessons.map((lesson) => (
+                        <ScheduleLessonCard
+                          key={lesson.id}
+                          lesson={lesson}
+                          student={lesson.studentIds[0] ? studentsById[lesson.studentIds[0]] : undefined}
+                          statusMenuOpen={statusMenuLessonId === lesson.id}
+                          onToggleStatus={() =>
+                            setStatusMenuLessonId((current) => (current === lesson.id ? null : lesson.id))
+                          }
+                          onStatusChange={(status) => {
+                            if (status === 'rescheduled') {
+                              setDayLessonsModalOpen(false);
+                            }
+                            handleQuickLessonStatusChange(lesson, status);
+                          }}
+                          onEdit={() => {
+                            setDayLessonsModalOpen(false);
+                            openLessonEditor(lesson);
+                          }}
+                          onDelete={() => deleteLesson(lesson.id)}
+                        />
+                      ))
                     )}
                   </View>
                 </View>
@@ -2184,6 +2169,84 @@ function PrimaryButton({ label, onPress, compact = false }: { label: string; onP
   );
 }
 
+function StatusButton({ status, onPress }: { status: Lesson['status']; onPress: () => void }) {
+  return (
+    <Pressable
+      accessibilityLabel={`Статус: ${formatLessonStatusLabel(status)}`}
+      onPress={onPress}
+      style={[
+        styles.statusSelectorButton,
+        status === 'completed' && styles.statusSelectorCompleted,
+        status === 'cancelled' && styles.statusSelectorCancelled,
+        status === 'rescheduled' && styles.statusSelectorRescheduled,
+      ]}
+    >
+      <View
+        style={[
+          styles.statusSelectorDot,
+          status === 'completed' && styles.statusSelectorDotCompleted,
+          status === 'cancelled' && styles.statusSelectorDotCancelled,
+          status === 'rescheduled' && styles.statusSelectorDotRescheduled,
+        ]}
+      />
+      <Text style={styles.statusSelectorText}>{formatLessonStatusLabel(status)}</Text>
+    </Pressable>
+  );
+}
+
+function ScheduleLessonCard({
+  lesson,
+  student,
+  statusMenuOpen,
+  onToggleStatus,
+  onStatusChange,
+  onEdit,
+  onDelete,
+}: {
+  lesson: Lesson;
+  student?: Student;
+  statusMenuOpen: boolean;
+  onToggleStatus: () => void;
+  onStatusChange: (status: Lesson['status']) => void;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const time = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit' }).format(new Date(lesson.startAt));
+  const studentLabel = student?.name ?? 'Анонимный урок';
+
+  return (
+    <View style={[styles.scheduleLessonCard, { borderLeftColor: student?.color ?? ANONYMOUS_LESSON_COLOR }]}>
+      <View style={styles.scheduleLessonHeader}>
+        <View style={styles.scheduleLessonDetails}>
+          <View style={styles.calendarLessonTitleRow}>
+            <View style={[styles.calendarDot, { backgroundColor: student?.color ?? ANONYMOUS_LESSON_COLOR }]} />
+            <Text style={styles.scheduleLessonStudent}>{studentLabel}</Text>
+          </View>
+          <Text style={styles.scheduleLessonTitle}>{lesson.title}</Text>
+          <Text style={styles.scheduleLessonMeta}>{time} · {lesson.durationMinutes} мин</Text>
+        </View>
+        <StatusButton status={lesson.status} onPress={onToggleStatus} />
+      </View>
+      <View style={styles.dayScheduleActions}>
+        <SmallAction label="Изменить" onPress={onEdit} />
+        <SmallAction label="Удалить" onPress={onDelete} />
+      </View>
+      {statusMenuOpen ? (
+        <View style={styles.dayScheduleStatusMenu}>
+          {(['scheduled', 'completed', 'cancelled', 'rescheduled'] as Lesson['status'][]).map((status) => (
+            <Pill
+              key={status}
+              label={formatLessonStatusLabel(status)}
+              selected={lesson.status === status}
+              onPress={() => onStatusChange(status)}
+            />
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 function SmallAction({ label, onPress }: { label: string; onPress: () => void }) {
   return (
     <Pressable onPress={onPress} style={styles.smallActionButton}>
@@ -2210,7 +2273,9 @@ function ModalCard({
             <Text style={styles.modalClose}>Закрыть</Text>
           </Pressable>
         </View>
-        <ScrollView showsVerticalScrollIndicator={false}>{children}</ScrollView>
+        <ScrollView contentContainerStyle={styles.modalScrollContent} showsVerticalScrollIndicator={false}>
+          {children}
+        </ScrollView>
       </View>
     </View>
   );
@@ -2220,11 +2285,12 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: '#eaf1f6',
+    paddingTop: 8,
   },
   hero: {
     paddingHorizontal: 20,
-    paddingTop: 22,
-    paddingBottom: 14,
+    paddingTop: 18,
+    paddingBottom: 10,
     borderBottomLeftRadius: 28,
     borderBottomRightRadius: 28,
   },
@@ -2272,7 +2338,7 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 8,
     paddingHorizontal: 14,
-    paddingTop: 14,
+    paddingTop: 10,
   },
   tabButton: {
     paddingHorizontal: 12,
@@ -2292,9 +2358,9 @@ const styles = StyleSheet.create({
     color: '#ffffff',
   },
   content: {
-    padding: 14,
-    paddingBottom: 120,
-    gap: 14,
+    padding: 12,
+    paddingBottom: 40,
+    gap: 12,
   },
   grid: {
     flexDirection: 'row',
@@ -2326,7 +2392,7 @@ const styles = StyleSheet.create({
   sectionCard: {
     backgroundColor: '#ffffff',
     borderRadius: 24,
-    padding: 18,
+    padding: 14,
   },
   sectionTitle: {
     color: '#153047',
@@ -2340,8 +2406,8 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   sectionBody: {
-    marginTop: 16,
-    gap: 12,
+    marginTop: 12,
+    gap: 10,
   },
   widgetPreview: {
     backgroundColor: '#153047',
@@ -2471,7 +2537,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#123c69',
     borderRadius: 16,
     paddingHorizontal: 16,
-    paddingVertical: 13,
+    paddingVertical: 11,
     alignItems: 'center',
     justifyContent: 'center',
     marginTop: 8,
@@ -2618,6 +2684,73 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     backgroundColor: '#e8f6f5',
     padding: 10,
+  },
+  scheduleLessonCard: {
+    borderLeftWidth: 4,
+    borderRadius: 8,
+    backgroundColor: '#e8f6f5',
+    padding: 10,
+  },
+  scheduleLessonHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+  },
+  scheduleLessonDetails: {
+    flex: 1,
+    gap: 3,
+  },
+  scheduleLessonStudent: {
+    color: '#17344e',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  scheduleLessonTitle: {
+    color: '#17344e',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  scheduleLessonMeta: {
+    color: '#527086',
+    fontSize: 12,
+  },
+  statusSelectorButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderRadius: 8,
+    backgroundColor: '#e7f0ff',
+    paddingHorizontal: 8,
+    paddingVertical: 7,
+  },
+  statusSelectorCompleted: {
+    backgroundColor: '#e3f5ed',
+  },
+  statusSelectorCancelled: {
+    backgroundColor: '#ffe8ea',
+  },
+  statusSelectorRescheduled: {
+    backgroundColor: '#fff2d9',
+  },
+  statusSelectorDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: '#1d5fcf',
+  },
+  statusSelectorDotCompleted: {
+    backgroundColor: '#176d68',
+  },
+  statusSelectorDotCancelled: {
+    backgroundColor: '#b83d4b',
+  },
+  statusSelectorDotRescheduled: {
+    backgroundColor: '#a26200',
+  },
+  statusSelectorText: {
+    color: '#17344e',
+    fontSize: 11,
+    fontWeight: '800',
   },
   dayScheduleLessonMain: {
     gap: 3,
@@ -2841,6 +2974,9 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 14,
+  },
+  modalScrollContent: {
+    paddingBottom: 16,
   },
   modalTitle: {
     color: '#163149',

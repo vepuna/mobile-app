@@ -130,7 +130,7 @@ export function findLessonConflicts(
   const draftEnd = draftStart + (Number(draft.durationMinutes) || 0) * 60 * 1000;
 
   return lessons.filter((lesson) => {
-    if (lesson.id === editingLessonId) {
+    if (lesson.id === editingLessonId || lesson.status === 'rescheduled') {
       return false;
     }
     const lessonStart = new Date(lesson.startAt).getTime();
@@ -184,6 +184,7 @@ export function deriveWidgetSnapshot(data: AppData, now: Date): WidgetSnapshot {
       (lesson) =>
         lesson.startAt.slice(0, 10) === todayToken &&
         lesson.status !== 'cancelled' &&
+        lesson.status !== 'rescheduled' &&
         (lesson.studentIds.length === 0 || lesson.studentIds.some((studentId) => activeStudentIds.has(studentId))),
     ),
   );
