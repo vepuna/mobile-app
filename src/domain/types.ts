@@ -18,6 +18,7 @@ export type Student = {
   notes: string;
   openingBalance: number;
   defaultRate: number;
+  color: string;
   isArchived: boolean;
 };
 

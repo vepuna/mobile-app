@@ -66,6 +66,7 @@ const RECURRENCE_PRESETS = [
   { key: 'biweekly', label: 'Раз в две недели (выбранные дни)', weekdays: [], everyWeeks: 2 },
 ] as const;
 const STUDENT_MARKER_COLORS = ['#2667ff', '#ff7a59', '#1fa774', '#9a4dff', '#eb5757', '#f0a202', '#0ea5a0', '#7c4d2b'];
+const ANONYMOUS_LESSON_COLOR = '#6b7280';
 const DAY_SCHEDULE_HOURS = Array.from({ length: 16 }, (_, index) => index + 7);
 
 type PaymentStatus = 'paid' | 'partial' | 'outstanding';
@@ -172,6 +173,36 @@ function normalizeStoredLesson(lesson: Lesson): Lesson {
   };
 }
 
+function createStudentColor(existingColors: Iterable<string>): string {
+  const usedColors = new Set(existingColors);
+  const paletteColor = STUDENT_MARKER_COLORS.find((color) => !usedColors.has(color));
+  if (paletteColor) {
+    return paletteColor;
+  }
+
+  for (let index = 0; index < 360; index += 1) {
+    const hue = Math.round((index * 137.508) % 360);
+    const color = `hsl(${hue}, 62%, 42%)`;
+    if (!usedColors.has(color)) {
+      return color;
+    }
+  }
+
+  return '#1f6f78';
+}
+
+function normalizeStoredStudents(students: Student[]): Student[] {
+  const usedColors = new Set<string>();
+
+  return students.map((student) => {
+    const color = student.color && !usedColors.has(student.color)
+      ? student.color
+      : createStudentColor(usedColors);
+    usedColors.add(color);
+    return { ...student, color };
+  });
+}
+
 function formatPaymentKindLabel(kind: Payment['kind']): string {
   return kind === 'prepayment' ? 'Предоплата' : 'Оплата';
 }
@@ -216,9 +247,14 @@ export default function App() {
   });
   const [lessonDatePickerOpen, setLessonDatePickerOpen] = useState(false);
   const [lessonDatePickerMonth, setLessonDatePickerMonth] = useState<Date>(() => monthStart(new Date()));
-  const [lessonDatePickerTarget, setLessonDatePickerTarget] = useState<'lesson' | 'recurrence'>('lesson');
+  const [lessonDatePickerTarget, setLessonDatePickerTarget] = useState<'lesson' | 'recurrence' | 'reschedule'>('lesson');
   const [paymentDatePickerOpen, setPaymentDatePickerOpen] = useState(false);
   const [paymentDatePickerMonth, setPaymentDatePickerMonth] = useState<Date>(() => monthStart(new Date()));
+  const [statusMenuLessonId, setStatusMenuLessonId] = useState<string | null>(null);
+  const [rescheduleModalOpen, setRescheduleModalOpen] = useState(false);
+  const [reschedulingLessonId, setReschedulingLessonId] = useState<string | null>(null);
+  const [rescheduleDate, setRescheduleDate] = useState(toDateToken(new Date()));
+  const [rescheduleTime, setRescheduleTime] = useState('16:00');
   const [automationStatus, setAutomationStatus] = useState(initialAutomationStatus);
 
   useEffect(() => {
@@ -230,7 +266,7 @@ export default function App() {
           setData({
             ...seedAppData,
             ...parsed,
-            students: parsed.students ?? seedAppData.students,
+            students: normalizeStoredStudents(parsed.students ?? seedAppData.students),
             lessons: (parsed.lessons ?? seedAppData.lessons).map(normalizeStoredLesson),
             payments: parsed.payments ?? seedAppData.payments,
             settings: {
@@ -301,7 +337,7 @@ export default function App() {
   const studentColorById = useMemo(
     () =>
       Object.fromEntries(
-        data.students.map((student, index) => [student.id, STUDENT_MARKER_COLORS[index % STUDENT_MARKER_COLORS.length]]),
+        data.students.map((student) => [student.id, student.color]),
       ),
     [data.students],
   );
@@ -415,31 +451,6 @@ export default function App() {
       }),
     );
   }, [activeLessons, activeStudents, data.payments]);
-  const selectedDayStudentEntries = useMemo(
-    () =>
-      selectedDayLessons.flatMap((lesson) =>
-        lesson.studentIds.map((studentId) => {
-          const overview = studentPaymentOverview[studentId];
-          const lessonPaymentStatus: PaymentStatus =
-            lesson.status === 'completed' ? overview?.lessonCoverage?.get(lesson.id) ?? 'outstanding' : 'outstanding';
-          return {
-            key: `${lesson.id}-${studentId}`,
-            lessonId: lesson.id,
-            lessonTitle: lesson.title,
-            studentId,
-            studentName: studentsById[studentId]?.name ?? 'Неизвестный ученик',
-            markerColor: studentColorById[studentId] ?? '#6b8293',
-            lessonTime: new Intl.DateTimeFormat('ru-RU', {
-              hour: '2-digit',
-              minute: '2-digit',
-            }).format(new Date(lesson.startAt)),
-            status: lessonPaymentStatus,
-            completionStatus: lesson.status,
-          };
-        }),
-      ),
-    [selectedDayLessons, studentColorById, studentPaymentOverview, studentsById],
-  );
   const todayDateToken = toDateToken(new Date());
   const todayLessons = useMemo(
     () => sortLessons(lessonsByDate[todayDateToken] ?? []),
@@ -447,24 +458,25 @@ export default function App() {
   );
   const todayStudentEntries = useMemo(
     () =>
-      todayLessons.flatMap((lesson) =>
-        lesson.studentIds.map((studentId) => {
-          const overview = studentPaymentOverview[studentId];
-          const lessonPaymentStatus: PaymentStatus =
-            lesson.status === 'completed' ? overview?.lessonCoverage?.get(lesson.id) ?? 'outstanding' : 'outstanding';
-          return {
-            key: `${lesson.id}-${studentId}`,
-            studentName: studentsById[studentId]?.name ?? 'Неизвестный ученик',
-            lessonTime: new Intl.DateTimeFormat('ru-RU', {
-              hour: '2-digit',
-              minute: '2-digit',
-            }).format(new Date(lesson.startAt)),
-            status: lessonPaymentStatus,
-            completionStatus: lesson.status,
-          };
-        }),
-      ),
-    [todayLessons, studentPaymentOverview, studentsById],
+      todayLessons.map((lesson) => {
+        const studentId = lesson.studentIds[0];
+        const overview = studentId ? studentPaymentOverview[studentId] : undefined;
+        const lessonPaymentStatus: PaymentStatus =
+          lesson.status === 'completed' ? overview?.lessonCoverage?.get(lesson.id) ?? 'outstanding' : 'outstanding';
+        return {
+          key: lesson.id,
+          lessonTitle: lesson.title,
+          studentName: studentId ? studentsById[studentId]?.name ?? 'Неизвестный ученик' : 'Резерв без ученика',
+          markerColor: studentId ? studentColorById[studentId] ?? ANONYMOUS_LESSON_COLOR : ANONYMOUS_LESSON_COLOR,
+          lessonTime: new Intl.DateTimeFormat('ru-RU', {
+            hour: '2-digit',
+            minute: '2-digit',
+          }).format(new Date(lesson.startAt)),
+          status: lessonPaymentStatus,
+          completionStatus: lesson.status,
+        };
+      }),
+    [studentColorById, studentPaymentOverview, studentsById, todayLessons],
   );
 
   const hasTimeslotConflict = (
@@ -490,6 +502,7 @@ export default function App() {
       return;
     }
 
+    const existingStudent = editingStudentId ? data.students.find((student) => student.id === editingStudentId) : undefined;
     const nextStudent: Student = {
       id: editingStudentId ?? `student-${Date.now()}`,
       name: studentDraft.name.trim(),
@@ -501,6 +514,7 @@ export default function App() {
       notes: studentDraft.notes.trim(),
       openingBalance: Number(studentDraft.openingBalance) || 0,
       defaultRate: Number(studentDraft.defaultRate) || 0,
+      color: existingStudent?.color ?? createStudentColor(data.students.map((student) => student.color)),
       isArchived: studentDraft.isArchived,
     };
 
@@ -816,6 +830,63 @@ export default function App() {
     }));
   };
 
+  const openRescheduleDialog = (lesson: Lesson) => {
+    const [date, timeWithSeconds] = lesson.startAt.split('T');
+    setReschedulingLessonId(lesson.id);
+    setRescheduleDate(date);
+    setRescheduleTime(timeWithSeconds.slice(0, 5));
+    setLessonDatePickerMonth(monthStart(new Date(`${date}T00:00:00`)));
+    setRescheduleModalOpen(true);
+  };
+
+  const handleQuickLessonStatusChange = (lesson: Lesson, status: Lesson['status']) => {
+    setStatusMenuLessonId(null);
+    if (status === 'rescheduled') {
+      openRescheduleDialog(lesson);
+      return;
+    }
+    updateLessonStatus(lesson.id, status);
+  };
+
+  const confirmReschedule = () => {
+    const originalLesson = reschedulingLessonId
+      ? data.lessons.find((lesson) => lesson.id === reschedulingLessonId)
+      : undefined;
+    const startAt = parseLessonStart(rescheduleDate, rescheduleTime);
+
+    if (!originalLesson || !startAt) {
+      Alert.alert('Некорректные дата или время', 'Используйте форматы YYYY-MM-DD и HH:mm.');
+      return;
+    }
+    if (hasTimeslotConflict(activeLessons, startAt, originalLesson.id, null)) {
+      Alert.alert('Слот уже занят', 'На выбранное время уже назначен другой урок.');
+      return;
+    }
+
+    const movedLesson: Lesson = {
+      ...originalLesson,
+      id: `lesson-${Date.now()}-rescheduled`,
+      startAt,
+      status: 'scheduled',
+      recurrenceId: null,
+      recurrenceEveryWeeks: null,
+      recurrenceWeekdays: null,
+      recurrenceStartDate: null,
+    };
+
+    setData((current) => ({
+      ...current,
+      lessons: [
+        movedLesson,
+        ...current.lessons.map((lesson): Lesson =>
+          lesson.id === originalLesson.id ? { ...lesson, status: 'rescheduled' } : lesson,
+        ),
+      ],
+    }));
+    setRescheduleModalOpen(false);
+    setReschedulingLessonId(null);
+  };
+
   const deleteLesson = (lessonId: string) => {
     Alert.alert('Удалить урок?', 'Урок будет удален из календаря. Это действие нельзя отменить.', [
       { text: 'Отмена', style: 'cancel' },
@@ -929,8 +1000,11 @@ export default function App() {
                   todayStudentEntries.map((entry) => (
                       <View key={`today-${entry.key}`} style={styles.paymentRow}>
                         <View>
-                          <Text style={styles.financeName}>{entry.studentName}</Text>
-                          <Text style={styles.financeMeta}>Время: {entry.lessonTime}</Text>
+                          <View style={styles.calendarLessonTitleRow}>
+                            <View style={[styles.calendarDot, { backgroundColor: entry.markerColor }]} />
+                            <Text style={styles.financeName}>{entry.studentName}</Text>
+                          </View>
+                          <Text style={styles.financeMeta}>{entry.lessonTitle} · {entry.lessonTime}</Text>
                         </View>
                         <View style={styles.todayLessonStatusWrap}>
                           <Text
@@ -1067,7 +1141,12 @@ export default function App() {
                   {monthGridDays.map((gridDay) => {
                     const dateToken = toDateToken(gridDay);
                     const dayLessons = lessonsByDate[dateToken] ?? [];
-                    const dayStudentMarkers = Array.from(new Set(dayLessons.flatMap((lesson) => lesson.studentIds)));
+                    const dayLessonMarkers = dayLessons.map((lesson) => ({
+                      id: lesson.id,
+                      color: lesson.studentIds[0]
+                        ? studentColorById[lesson.studentIds[0]] ?? ANONYMOUS_LESSON_COLOR
+                        : ANONYMOUS_LESSON_COLOR,
+                    }));
                     const isCurrentMonth = gridDay.getMonth() === calendarMonth.getMonth();
                     const isSelected = selectedCalendarDate === dateToken;
                     const isToday = dateToken === toDateToken(new Date());
@@ -1102,20 +1181,31 @@ export default function App() {
                           {gridDay.getDate()}
                         </Text>
                         <View style={styles.calendarDotsRow}>
-                          {dayStudentMarkers.slice(0, 6).map((studentId) => (
+                          {dayLessonMarkers.map((marker) => (
                             <View
-                              key={`${dateToken}-${studentId}`}
+                              key={`${dateToken}-${marker.id}`}
                               style={[
                                 styles.calendarDot,
-                                { backgroundColor: studentColorById[studentId] ?? '#6b8293' },
+                                { backgroundColor: marker.color },
                               ]}
                             />
                           ))}
-                          {dayStudentMarkers.length > 6 ? <Text style={styles.calendarMore}>+{dayStudentMarkers.length - 6}</Text> : null}
                         </View>
                       </Pressable>
                     );
                   })}
+                </View>
+                <View style={styles.calendarLegend}>
+                  {activeStudents.map((student) => (
+                    <View key={student.id} style={styles.calendarLegendItem}>
+                      <View style={[styles.calendarDot, { backgroundColor: student.color }]} />
+                      <Text style={styles.calendarLegendText}>{student.name}</Text>
+                    </View>
+                  ))}
+                  <View style={styles.calendarLegendItem}>
+                    <View style={[styles.calendarDot, { backgroundColor: ANONYMOUS_LESSON_COLOR }]} />
+                    <Text style={styles.calendarLegendText}>Резерв без ученика</Text>
+                  </View>
                 </View>
               </SectionCard>
             </>
@@ -1684,7 +1774,10 @@ export default function App() {
                         }).format(new Date(lesson.startAt));
 
                         return (
-                          <View key={lesson.id} style={styles.dayScheduleLesson}>
+                          <View
+                            key={lesson.id}
+                            style={[styles.dayScheduleLesson, { borderColor: student?.color ?? ANONYMOUS_LESSON_COLOR }]}
+                          >
                             <Pressable
                               onPress={() => {
                                 setDayLessonsModalOpen(false);
@@ -1709,6 +1802,12 @@ export default function App() {
                             </Pressable>
                             <View style={styles.dayScheduleActions}>
                               <SmallAction
+                                label="Статус"
+                                onPress={() =>
+                                  setStatusMenuLessonId((current) => (current === lesson.id ? null : lesson.id))
+                                }
+                              />
+                              <SmallAction
                                 label="Изменить"
                                 onPress={() => {
                                   setDayLessonsModalOpen(false);
@@ -1717,6 +1816,18 @@ export default function App() {
                               />
                               <SmallAction label="Удалить" onPress={() => deleteLesson(lesson.id)} />
                             </View>
+                            {statusMenuLessonId === lesson.id ? (
+                              <View style={styles.dayScheduleStatusMenu}>
+                                {(['scheduled', 'completed', 'cancelled', 'rescheduled'] as Lesson['status'][]).map((status) => (
+                                  <Pill
+                                    key={status}
+                                    label={formatLessonStatusLabel(status)}
+                                    selected={lesson.status === status}
+                                    onPress={() => handleQuickLessonStatusChange(lesson, status)}
+                                  />
+                                ))}
+                              </View>
+                            ) : null}
                           </View>
                         );
                       })
@@ -1726,6 +1837,37 @@ export default function App() {
               );
             })}
           </View>
+        </ModalCard>
+      </Modal>
+
+      <Modal
+        visible={rescheduleModalOpen}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setRescheduleModalOpen(false)}
+      >
+        <ModalCard
+          title="Перенести урок"
+          onClose={() => {
+            setRescheduleModalOpen(false);
+            setReschedulingLessonId(null);
+          }}
+        >
+          <DateFieldButton
+            label="Новая дата"
+            value={formatShortDate(`${rescheduleDate}T00:00:00`, 'ru-RU')}
+            onPress={() => {
+              setLessonDatePickerTarget('reschedule');
+              setLessonDatePickerOpen(true);
+            }}
+          />
+          <Field
+            label="Новое время"
+            value={rescheduleTime}
+            onChangeText={setRescheduleTime}
+            placeholder="16:00"
+          />
+          <PrimaryButton label="Перенести урок" onPress={confirmReschedule} />
         </ModalCard>
       </Modal>
 
@@ -1758,7 +1900,11 @@ export default function App() {
               const token = toDateToken(gridDay);
               const isCurrentMonth = gridDay.getMonth() === lessonDatePickerMonth.getMonth();
               const selected =
-                lessonDatePickerTarget === 'lesson' ? lessonDraft.lessonDate === token : recurrenceDraft.startDate === token;
+                lessonDatePickerTarget === 'lesson'
+                  ? lessonDraft.lessonDate === token
+                  : lessonDatePickerTarget === 'recurrence'
+                  ? recurrenceDraft.startDate === token
+                  : rescheduleDate === token;
 
               return (
                 <Pressable
@@ -1767,8 +1913,10 @@ export default function App() {
                   onPress={() => {
                     if (lessonDatePickerTarget === 'lesson') {
                       setLessonDraft((current) => ({ ...current, lessonDate: token }));
-                    } else {
+                    } else if (lessonDatePickerTarget === 'recurrence') {
                       setRecurrenceDraft((current) => ({ ...current, startDate: token }));
+                    } else {
+                      setRescheduleDate(token);
                     }
                     setLessonDatePickerOpen(false);
                   }}
@@ -2407,6 +2555,22 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 4,
   },
+  calendarLegend: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    marginTop: 14,
+  },
+  calendarLegendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  calendarLegendText: {
+    color: '#527086',
+    fontSize: 12,
+    fontWeight: '700',
+  },
   dayScheduleTimeline: {
     marginTop: 12,
     borderTopWidth: 1,
@@ -2482,6 +2646,12 @@ const styles = StyleSheet.create({
     color: '#a26200',
   },
   dayScheduleActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 10,
+  },
+  dayScheduleStatusMenu: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 8,

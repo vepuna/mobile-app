@@ -21,6 +21,7 @@ const testData: AppData = {
       notes: '',
       openingBalance: 20,
       defaultRate: 45,
+      color: '#2667ff',
       isArchived: false,
     },
     {
@@ -34,6 +35,7 @@ const testData: AppData = {
       notes: '',
       openingBalance: -30,
       defaultRate: 50,
+      color: '#ff7a59',
       isArchived: false,
     },
   ],
@@ -159,6 +161,31 @@ describe('tutor domain selectors', () => {
     expect(snapshot.todayLessonCount).toBe(0);
     expect(snapshot.lessonLines).toHaveLength(0);
     expect(snapshot.freeSlotsText).toContain('На сегодня уроков нет');
+  });
+
+  it('keeps anonymous lessons visible in dashboard and widget scheduling views', () => {
+    const anonymousLesson = {
+      id: 'lesson-reserve',
+      title: 'Reserved consultation',
+      startAt: '2026-06-26T18:00:00',
+      durationMinutes: 60,
+      costPerStudent: 0,
+      status: 'scheduled' as const,
+      studentIds: [],
+      note: '',
+    };
+    const dataWithReserve: AppData = {
+      ...testData,
+      lessons: [...testData.lessons, anonymousLesson],
+    };
+
+    const dashboard = deriveDashboard(dataWithReserve, new Date('2026-06-26T08:00:00.000Z'));
+    const snapshot = deriveWidgetSnapshot(dataWithReserve, new Date('2026-06-26T08:00:00.000Z'));
+
+    expect(dashboard.upcomingLessons).toHaveLength(2);
+    expect(dashboard.plannedLessonsCount).toBe(2);
+    expect(snapshot.todayLessonCount).toBe(2);
+    expect(snapshot.lessonLines.some((line) => line.includes('Reserved consultation'))).toBe(true);
   });
 
   it('does not include archived students or their lessons in dashboard metrics and widgets', () => {
