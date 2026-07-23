@@ -7,6 +7,7 @@ import { type AppData, type WidgetSnapshot } from '../domain/types';
 import { TutorAgendaWidget, TUTOR_WIDGET_NAME } from './TutorAgendaWidget';
 
 const WIDGET_STORAGE_KEY = 'tutor-assistant.widget.v1';
+let widgetSyncQueue: Promise<void> = Promise.resolve();
 
 const emptySnapshot: WidgetSnapshot = {
   generatedAt: new Date(0).toISOString(),
@@ -29,21 +30,25 @@ export async function loadTutorWidgetSnapshot(): Promise<WidgetSnapshot> {
   }
 }
 
-export async function syncTutorWidget(data: AppData): Promise<string> {
+export function syncTutorWidget(data: AppData): Promise<string> {
   const snapshot = deriveWidgetSnapshot(data, new Date());
-  await AsyncStorage.setItem(WIDGET_STORAGE_KEY, JSON.stringify(snapshot));
+  widgetSyncQueue = widgetSyncQueue
+    .catch(() => {})
+    .then(async () => {
+      await AsyncStorage.setItem(WIDGET_STORAGE_KEY, JSON.stringify(snapshot));
 
-  if (Platform.OS === 'android') {
-    await requestWidgetUpdate({
-      widgetName: TUTOR_WIDGET_NAME,
-      renderWidget: (widgetInfo) =>
-        React.createElement(TutorAgendaWidget, {
-          snapshot,
-          widgetInfo,
-        }),
-      widgetNotFound: () => {},
+      if (Platform.OS === 'android') {
+        await requestWidgetUpdate({
+          widgetName: TUTOR_WIDGET_NAME,
+          renderWidget: (widgetInfo) =>
+            React.createElement(TutorAgendaWidget, {
+              snapshot,
+              widgetInfo,
+            }),
+          widgetNotFound: () => {},
+        });
+      }
     });
-  }
 
-  return snapshot.generatedAt;
+  return widgetSyncQueue.then(() => snapshot.generatedAt);
 }

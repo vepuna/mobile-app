@@ -44,7 +44,7 @@ const testData: AppData = {
       startAt: '2026-06-26T16:00:00',
       durationMinutes: 60,
       costPerStudent: 45,
-      status: 'planned',
+      status: 'scheduled',
       studentIds: ['student-maria'],
       note: '',
     },
@@ -54,7 +54,7 @@ const testData: AppData = {
       startAt: '2026-06-27T11:30:00',
       durationMinutes: 90,
       costPerStudent: 50,
-      status: 'done',
+      status: 'completed',
       studentIds: ['student-alex'],
       note: '',
     },
@@ -64,7 +64,7 @@ const testData: AppData = {
       startAt: '2026-06-28T09:00:00',
       durationMinutes: 75,
       costPerStudent: 30,
-      status: 'missed',
+      status: 'cancelled',
       studentIds: ['student-maria', 'student-alex'],
       note: '',
     },
@@ -103,11 +103,11 @@ describe('tutor domain selectors', () => {
     expect(calculateBalance(maria, testData.lessons, testData.payments)).toBe(200);
   });
 
-  it('duplicates a lesson into the next week and resets status to planned', () => {
+  it('duplicates a lesson into the next week and resets status to scheduled', () => {
     const lesson = testData.lessons[1];
     const duplicated = createNextWeekLesson(lesson);
 
-    expect(duplicated.status).toBe('planned');
+    expect(duplicated.status).toBe('scheduled');
     expect(new Date(duplicated.startAt).getTime() - new Date(lesson.startAt).getTime()).toBe(
       7 * 24 * 60 * 60 * 1000,
     );
@@ -120,8 +120,7 @@ describe('tutor domain selectors', () => {
         lessonDate: '2026-06-27',
         lessonTime: '11:45',
         durationMinutes: '45',
-        costPerStudent: '50',
-        status: 'planned',
+        status: 'scheduled',
         studentIds: ['student-alex'],
         note: '',
       },
@@ -160,5 +159,29 @@ describe('tutor domain selectors', () => {
     expect(snapshot.todayLessonCount).toBe(0);
     expect(snapshot.lessonLines).toHaveLength(0);
     expect(snapshot.freeSlotsText).toContain('На сегодня уроков нет');
+  });
+
+  it('does not include archived students or their lessons in dashboard metrics and widgets', () => {
+    const archivedData: AppData = {
+      ...testData,
+      students: testData.students.map((student) =>
+        student.id === 'student-maria' ? { ...student, isArchived: true } : student,
+      ),
+    };
+
+    const dashboard = deriveDashboard(archivedData, new Date('2026-06-26T08:00:00.000Z'));
+    const snapshot = deriveWidgetSnapshot(archivedData, new Date('2026-06-26T08:00:00.000Z'));
+
+    expect(dashboard.upcomingLessons).toHaveLength(0);
+    expect(snapshot.todayLessonCount).toBe(0);
+  });
+
+  it('counts debt only for completed unpaid lessons', () => {
+    const alex = testData.students[1];
+    const unpaidCompleted = { ...testData.lessons[1], status: 'completed' as const };
+    const futureLesson = { ...testData.lessons[0], studentIds: ['student-alex'], status: 'scheduled' as const };
+    const cancelledLesson = { ...testData.lessons[2], studentIds: ['student-alex'], status: 'cancelled' as const };
+
+    expect(calculateBalance(alex, [unpaidCompleted, futureLesson, cancelledLesson], [])).toBe(-80);
   });
 });

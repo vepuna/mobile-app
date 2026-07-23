@@ -22,14 +22,12 @@ export function isValidLessonDraft(draft: LessonDraft): boolean {
     draft.title.trim() &&
       draft.lessonDate.trim() &&
       draft.lessonTime.trim() &&
-      draft.studentIds.length > 0 &&
-      Number(draft.durationMinutes) > 0 &&
-      Number(draft.costPerStudent) >= 0,
+      Number(draft.durationMinutes) > 0,
   );
 }
 
 export function lessonChargeForStudent(lesson: Lesson, studentId: string): number {
-  return lesson.status === 'done' && lesson.studentIds.includes(studentId) ? lesson.costPerStudent : 0;
+  return lesson.status === 'completed' && lesson.studentIds.includes(studentId) ? lesson.costPerStudent : 0;
 }
 
 export function calculateBalance(student: Student, lessons: Lesson[], payments: Payment[]): number {
@@ -46,7 +44,7 @@ export function createNextWeekLesson(lesson: Lesson): Lesson {
     ...lesson,
     id: `${lesson.id}-next-${Date.now()}`,
     startAt: moveDateIsoByDays(lesson.startAt, 7),
-    status: 'planned',
+    status: 'scheduled',
   };
 }
 
@@ -65,18 +63,24 @@ export function moveDateIsoByDays(isoValue: string, dayShift: number): string {
 }
 
 export function deriveDashboard(data: AppData, now: Date) {
+  const activeStudentIds = new Set(data.students.filter((student) => !student.isArchived).map((student) => student.id));
+  const activeLessons = data.lessons.filter(
+    (lesson) => lesson.studentIds.length === 0 || lesson.studentIds.some((studentId) => activeStudentIds.has(studentId)),
+  );
   const monthToken = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  const balances = data.students.map((student) => calculateBalance(student, data.lessons, data.payments));
+  const balances = data.students
+    .filter((student) => !student.isArchived)
+    .map((student) => calculateBalance(student, activeLessons, data.payments));
   const upcomingLessons = sortLessons(
-    data.lessons.filter(
-      (lesson) => lesson.status === 'planned' && new Date(lesson.startAt).getTime() >= now.getTime(),
+    activeLessons.filter(
+      (lesson) => lesson.status === 'scheduled' && new Date(lesson.startAt).getTime() >= now.getTime(),
     ),
   );
   const todayToken = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
     now.getDate(),
   ).padStart(2, '0')}`;
-  const todayLessons = data.lessons.filter(
-    (lesson) => lesson.startAt.slice(0, 10) === todayToken && lesson.status === 'planned',
+  const todayLessons = activeLessons.filter(
+    (lesson) => lesson.startAt.slice(0, 10) === todayToken && lesson.status === 'scheduled',
   );
   const calendarDays = Array.from({ length: 14 }, (_, offset) => {
     const date = new Date(now);
@@ -90,8 +94,8 @@ export function deriveDashboard(data: AppData, now: Date) {
   const monthIncome = data.payments
     .filter((payment) => payment.paidAt.startsWith(monthToken))
     .reduce((total, payment) => total + payment.amount, 0);
-  const monthBilled = data.lessons
-    .filter((lesson) => lesson.startAt.startsWith(monthToken) && lesson.status === 'done')
+  const monthBilled = activeLessons
+    .filter((lesson) => lesson.startAt.startsWith(monthToken) && lesson.status === 'completed')
     .reduce((total, lesson) => total + lesson.costPerStudent * lesson.studentIds.length, 0);
 
   return {
@@ -103,9 +107,9 @@ export function deriveDashboard(data: AppData, now: Date) {
     monthBilled,
     upcomingLessons,
     todayLessons,
-    doneLessonsCount: data.lessons.filter((lesson) => lesson.status === 'done').length,
-    missedLessonsCount: data.lessons.filter((lesson) => lesson.status === 'missed').length,
-    plannedLessonsCount: data.lessons.filter((lesson) => lesson.status === 'planned').length,
+    doneLessonsCount: activeLessons.filter((lesson) => lesson.status === 'completed').length,
+    missedLessonsCount: activeLessons.filter((lesson) => lesson.status === 'cancelled').length,
+    plannedLessonsCount: activeLessons.filter((lesson) => lesson.status === 'scheduled').length,
     calendarDays,
     freeSlotsText:
       todayLessons.length < 4 ? 'На сегодня еще есть свободные окна.' : 'День почти полностью занят.',
@@ -137,7 +141,7 @@ export function findLessonConflicts(
 
 export function getCalendarTone(dateToken: string, lessons: Lesson[]): 'planned' | 'missed' {
   const matches = lessons.filter((lesson) => lesson.startAt.slice(0, 10) === dateToken);
-  return matches.some((lesson) => lesson.status === 'missed') ? 'missed' : 'planned';
+  return matches.some((lesson) => lesson.status === 'cancelled') ? 'missed' : 'planned';
 }
 
 export function formatCurrency(value: number, formatter: Intl.NumberFormat): string {
@@ -171,11 +175,17 @@ export function formatMonthYear(isoValue: string, locale = 'ru-RU'): string {
 
 export function deriveWidgetSnapshot(data: AppData, now: Date): WidgetSnapshot {
   const dashboard = deriveDashboard(data, now);
+  const activeStudentIds = new Set(data.students.filter((student) => !student.isArchived).map((student) => student.id));
   const todayToken = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
     now.getDate(),
   ).padStart(2, '0')}`;
   const todayLessons = sortLessons(
-    data.lessons.filter((lesson) => lesson.startAt.slice(0, 10) === todayToken && lesson.status !== 'missed'),
+    data.lessons.filter(
+      (lesson) =>
+        lesson.startAt.slice(0, 10) === todayToken &&
+        lesson.status !== 'cancelled' &&
+        (lesson.studentIds.length === 0 || lesson.studentIds.some((studentId) => activeStudentIds.has(studentId))),
+    ),
   );
   const lessonLines = todayLessons.slice(0, 4).map((lesson) => {
     const studentNames = lesson.studentIds

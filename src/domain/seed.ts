@@ -37,8 +37,7 @@ export function createEmptyLessonDraft(): LessonDraft {
     lessonDate: '2026-06-26',
     lessonTime: '16:00',
     durationMinutes: '60',
-    costPerStudent: '40',
-    status: 'planned',
+    status: 'scheduled',
     studentIds: [],
     note: '',
   };

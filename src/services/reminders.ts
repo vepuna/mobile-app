@@ -105,9 +105,14 @@ export async function syncReminderAutomation(
   await Notifications.cancelAllScheduledNotificationsAsync();
 
   let scheduledLessonReminderCount = 0;
+  const activeStudentIds = new Set(data.students.filter((student) => !student.isArchived).map((student) => student.id));
+  const activeLessons = data.lessons.filter(
+    (lesson) => lesson.studentIds.length === 0 || lesson.studentIds.some((studentId) => activeStudentIds.has(studentId)),
+  );
+
   if (data.settings.lessonRemindersEnabled) {
     const reminderLeadMs = data.settings.reminderMinutesBeforeLesson * 60 * 1000;
-    for (const lesson of sortLessons(data.lessons).filter((item) => item.status === 'planned')) {
+    for (const lesson of sortLessons(activeLessons).filter((item) => item.status === 'scheduled')) {
       const triggerAt = new Date(lesson.startAt).getTime() - reminderLeadMs;
       if (triggerAt <= Date.now()) {
         continue;
@@ -137,7 +142,7 @@ export async function syncReminderAutomation(
   const atRiskStudents = data.students.filter(
     (student) =>
       !student.isArchived &&
-      calculateBalance(student, data.lessons, data.payments) <= data.settings.lowBalanceThreshold,
+      calculateBalance(student, activeLessons, data.payments) <= data.settings.lowBalanceThreshold,
   );
   let lowBalanceReminderScheduled = false;
 

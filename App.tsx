@@ -23,7 +23,6 @@ import {
 } from './src/domain/seed';
 import {
   calculateBalance,
-  createNextWeekLesson,
   deriveDashboard,
   findLessonConflicts,
   formatCurrency,
@@ -67,6 +66,7 @@ const RECURRENCE_PRESETS = [
   { key: 'biweekly', label: 'Раз в две недели (выбранные дни)', weekdays: [], everyWeeks: 2 },
 ] as const;
 const STUDENT_MARKER_COLORS = ['#2667ff', '#ff7a59', '#1fa774', '#9a4dff', '#eb5757', '#f0a202', '#0ea5a0', '#7c4d2b'];
+const DAY_SCHEDULE_HOURS = Array.from({ length: 16 }, (_, index) => index + 7);
 
 type PaymentStatus = 'paid' | 'partial' | 'outstanding';
 
@@ -142,13 +142,34 @@ function generateRecurringDateTokens(startDate: string, weekdays: number[], ever
 }
 
 function formatLessonStatusLabel(status: Lesson['status']): string {
-  if (status === 'planned') {
+  if (status === 'scheduled') {
     return 'Запланирован';
   }
-  if (status === 'done') {
+  if (status === 'completed') {
     return 'Проведен';
   }
-  return 'Пропущен';
+  if (status === 'cancelled') {
+    return 'Отменен';
+  }
+  return 'Перенесен';
+}
+
+function normalizeStoredLesson(lesson: Lesson): Lesson {
+  const legacyStatus = lesson.status as string;
+  const status: Lesson['status'] =
+    legacyStatus === 'planned'
+      ? 'scheduled'
+      : legacyStatus === 'done'
+      ? 'completed'
+      : legacyStatus === 'missed'
+      ? 'cancelled'
+      : lesson.status;
+
+  return {
+    ...lesson,
+    status,
+    studentIds: lesson.studentIds ?? [],
+  };
 }
 
 function formatPaymentKindLabel(kind: Payment['kind']): string {
@@ -210,7 +231,7 @@ export default function App() {
             ...seedAppData,
             ...parsed,
             students: parsed.students ?? seedAppData.students,
-            lessons: parsed.lessons ?? seedAppData.lessons,
+            lessons: (parsed.lessons ?? seedAppData.lessons).map(normalizeStoredLesson),
             payments: parsed.payments ?? seedAppData.payments,
             settings: {
               ...seedAppData.settings,
@@ -268,6 +289,15 @@ export default function App() {
     () => Object.fromEntries(data.students.map((student) => [student.id, student] as const)),
     [data.students],
   );
+  const activeStudents = useMemo(() => data.students.filter((student) => !student.isArchived), [data.students]);
+  const activeStudentIds = useMemo(() => new Set(activeStudents.map((student) => student.id)), [activeStudents]);
+  const activeLessons = useMemo(
+    () =>
+      data.lessons.filter(
+        (lesson) => lesson.studentIds.length === 0 || lesson.studentIds.some((studentId) => activeStudentIds.has(studentId)),
+      ),
+    [activeStudentIds, data.lessons],
+  );
   const studentColorById = useMemo(
     () =>
       Object.fromEntries(
@@ -290,33 +320,33 @@ export default function App() {
   const studentBalances = useMemo(
     () =>
       Object.fromEntries(
-        data.students.map((student) => [
+        activeStudents.map((student) => [
           student.id,
-          calculateBalance(student, data.lessons, data.payments),
+          calculateBalance(student, activeLessons, data.payments),
         ]),
       ),
-    [data.lessons, data.payments, data.students],
+    [activeLessons, activeStudents, data.payments],
   );
   const financeStudentIds = selectedFinanceStudentId
     ? [selectedFinanceStudentId]
-    : data.students.map((student) => student.id);
+    : activeStudents.map((student) => student.id);
   const filteredPayments = data.payments
     .filter((payment) => financeStudentIds.includes(payment.studentId))
     .sort((left, right) => right.paidAt.localeCompare(left.paidAt));
   const filteredIncome = filteredPayments.reduce((total, payment) => total + payment.amount, 0);
   const lessonConflicts = useMemo(
-    () => findLessonConflicts(lessonDraft, data.lessons, editingLessonId),
-    [data.lessons, editingLessonId, lessonDraft],
+    () => findLessonConflicts(lessonDraft, activeLessons, editingLessonId),
+    [activeLessons, editingLessonId, lessonDraft],
   );
   const lessonsByDate = useMemo(
     () =>
-      data.lessons.reduce<Record<string, Lesson[]>>((acc, lesson) => {
+      activeLessons.reduce<Record<string, Lesson[]>>((acc, lesson) => {
         const dateToken = lesson.startAt.slice(0, 10);
         const list = acc[dateToken] ?? [];
         acc[dateToken] = [...list, lesson];
         return acc;
       }, {}),
-    [data.lessons],
+    [activeLessons],
   );
   const monthGridDays = useMemo(() => createMonthGrid(calendarMonth), [calendarMonth]);
   const selectedDayLessons = useMemo(
@@ -325,9 +355,9 @@ export default function App() {
   );
   const studentPaymentOverview = useMemo(() => {
     return Object.fromEntries(
-      data.students.map((student) => {
+      activeStudents.map((student) => {
         const doneLessons = sortLessons(
-          data.lessons.filter((lesson) => lesson.status === 'done' && lesson.studentIds.includes(student.id)),
+          activeLessons.filter((lesson) => lesson.status === 'completed' && lesson.studentIds.includes(student.id)),
         );
         const totalDue = doneLessons.reduce((total, lesson) => total + lesson.costPerStudent, 0);
         const totalPaid = data.payments
@@ -339,9 +369,9 @@ export default function App() {
           .sort((left, right) => right.paidAt.localeCompare(left.paidAt));
         const lastPaymentDate = studentPayments[0]?.paidAt ?? null;
         const nextExpected = sortLessons(
-          data.lessons.filter(
+          activeLessons.filter(
             (lesson) =>
-              lesson.status === 'planned' &&
+              lesson.status === 'scheduled' &&
               lesson.studentIds.includes(student.id) &&
               new Date(lesson.startAt).getTime() > Date.now(),
           ),
@@ -384,14 +414,14 @@ export default function App() {
         ];
       }),
     );
-  }, [data.lessons, data.payments, data.students]);
+  }, [activeLessons, activeStudents, data.payments]);
   const selectedDayStudentEntries = useMemo(
     () =>
       selectedDayLessons.flatMap((lesson) =>
         lesson.studentIds.map((studentId) => {
           const overview = studentPaymentOverview[studentId];
           const lessonPaymentStatus: PaymentStatus =
-            lesson.status === 'done' ? overview?.lessonCoverage?.get(lesson.id) ?? 'outstanding' : 'outstanding';
+            lesson.status === 'completed' ? overview?.lessonCoverage?.get(lesson.id) ?? 'outstanding' : 'outstanding';
           return {
             key: `${lesson.id}-${studentId}`,
             lessonId: lesson.id,
@@ -421,7 +451,7 @@ export default function App() {
         lesson.studentIds.map((studentId) => {
           const overview = studentPaymentOverview[studentId];
           const lessonPaymentStatus: PaymentStatus =
-            lesson.status === 'done' ? overview?.lessonCoverage?.get(lesson.id) ?? 'outstanding' : 'outstanding';
+            lesson.status === 'completed' ? overview?.lessonCoverage?.get(lesson.id) ?? 'outstanding' : 'outstanding';
           return {
             key: `${lesson.id}-${studentId}`,
             studentName: studentsById[studentId]?.name ?? 'Неизвестный ученик',
@@ -486,7 +516,7 @@ export default function App() {
 
   const upsertLesson = () => {
     if (!isValidLessonDraft(lessonDraft)) {
-      Alert.alert('Данные урока неполные', 'Укажите тему, дату, время, длительность, стоимость и минимум одного ученика.');
+      Alert.alert('Данные урока неполные', 'Укажите тему, дату, время и длительность.');
       return;
     }
 
@@ -496,14 +526,16 @@ export default function App() {
       return;
     }
 
+    const selectedStudentId = lessonDraft.studentIds[0];
+    const selectedStudent = selectedStudentId ? studentsById[selectedStudentId] : undefined;
     const nextLesson: Lesson = {
       id: editingLessonId ?? `lesson-${Date.now()}`,
       title: lessonDraft.title.trim(),
       startAt,
       durationMinutes: Number(lessonDraft.durationMinutes) || 60,
-      costPerStudent: Number(lessonDraft.costPerStudent) || 0,
+      costPerStudent: selectedStudent?.defaultRate ?? 0,
       status: lessonDraft.status,
-      studentIds: lessonDraft.studentIds,
+      studentIds: selectedStudentId ? [selectedStudentId] : [],
       note: lessonDraft.note.trim(),
       recurrenceId: null,
       recurrenceEveryWeeks: null,
@@ -511,7 +543,7 @@ export default function App() {
       recurrenceStartDate: null,
     };
 
-    if (hasTimeslotConflict(data.lessons, nextLesson.startAt, editingLessonId, null)) {
+    if (hasTimeslotConflict(activeLessons, nextLesson.startAt, editingLessonId, null)) {
       Alert.alert('Слот уже занят', 'На это время уже запланирован другой урок. Выберите другое время.');
       return;
     }
@@ -538,7 +570,7 @@ export default function App() {
           continue;
         }
         const conflict = hasTimeslotConflict(
-          data.lessons,
+          activeLessons,
           recurringStart,
           editingLessonId,
           editingLessonId ? recurrenceId : null,
@@ -689,7 +721,7 @@ export default function App() {
     setStudentModalOpen(true);
   };
 
-  const openLessonEditor = (lesson?: Lesson) => {
+  const openLessonEditor = (lesson?: Lesson, slot?: { date: string; time: string }) => {
     if (lesson) {
       const [datePart, timePartWithSeconds] = lesson.startAt.split('T');
       setEditingLessonId(lesson.id);
@@ -698,8 +730,7 @@ export default function App() {
         lessonDate: datePart,
         lessonTime: timePartWithSeconds.slice(0, 5),
         durationMinutes: String(lesson.durationMinutes),
-        costPerStudent: String(lesson.costPerStudent),
-        studentIds: lesson.studentIds,
+        studentIds: lesson.studentIds.slice(0, 1),
         note: lesson.note,
         status: lesson.status,
       });
@@ -713,7 +744,11 @@ export default function App() {
       setLessonDatePickerMonth(monthStart(new Date(`${datePart}T00:00:00`)));
     } else {
       setEditingLessonId(null);
-      setLessonDraft(createEmptyLessonDraft());
+      setLessonDraft({
+        ...createEmptyLessonDraft(),
+        lessonDate: slot?.date ?? selectedCalendarDate,
+        lessonTime: slot?.time ?? '16:00',
+      });
       setRecurrenceDraft({
         enabled: false,
         weekdays: [],
@@ -721,7 +756,7 @@ export default function App() {
         weeksCount: 8,
         startDate: toDateToken(new Date()),
       });
-      setLessonDatePickerMonth(monthStart(new Date()));
+      setLessonDatePickerMonth(monthStart(new Date(`${slot?.date ?? selectedCalendarDate}T00:00:00`)));
     }
 
     setLessonModalOpen(true);
@@ -781,25 +816,23 @@ export default function App() {
     }));
   };
 
-  const duplicateLesson = (lessonId: string) => {
-    setData((current) => {
-      const lesson = current.lessons.find((item) => item.id === lessonId);
-      if (!lesson) {
-        return current;
-      }
-
-      const nextLesson = createNextWeekLesson(lesson);
-      const conflict = hasTimeslotConflict(current.lessons, nextLesson.startAt, null, null);
-      if (conflict) {
-        Alert.alert('Дублирование невозможно', 'На это время уже есть урок. Дубликат не создан.');
-        return current;
-      }
-
-      return {
-        ...current,
-        lessons: [nextLesson, ...current.lessons],
-      };
-    });
+  const deleteLesson = (lessonId: string) => {
+    Alert.alert('Удалить урок?', 'Урок будет удален из календаря. Это действие нельзя отменить.', [
+      { text: 'Отмена', style: 'cancel' },
+      {
+        text: 'Удалить',
+        style: 'destructive',
+        onPress: () => {
+          setData((current) => ({
+            ...current,
+            lessons: current.lessons.filter((lesson) => lesson.id !== lessonId),
+          }));
+          if (editingLessonId === lessonId) {
+            closeLessonModal();
+          }
+        },
+      },
+    ]);
   };
 
   const toggleStudentArchive = (studentId: string) => {
@@ -913,10 +946,12 @@ export default function App() {
                             {entry.status === 'paid' ? 'Оплачено' : entry.status === 'partial' ? 'Частично оплачено' : 'Есть долг'}
                           </Text>
                           <Text style={styles.financeMeta}>
-                            {entry.completionStatus === 'done'
+                            {entry.completionStatus === 'completed'
                               ? 'Проведен'
-                              : entry.completionStatus === 'missed'
-                              ? 'Пропущен'
+                              : entry.completionStatus === 'cancelled'
+                              ? 'Отменен'
+                              : entry.completionStatus === 'rescheduled'
+                              ? 'Перенесен'
                               : 'Запланирован'}
                           </Text>
                         </View>
@@ -933,21 +968,6 @@ export default function App() {
                   label="Общая задолженность"
                   value={formatCurrency(dashboard.totalDebtAbs, currencyFormatter)}
                 />
-              </SectionCard>
-
-              <SectionCard title="Ближайшие занятия" subtitle="Редактируйте, дублируйте и переносите уроки.">
-                {dashboard.upcomingLessons.slice(0, 5).map((lesson) => (
-                  <LessonCard
-                    key={lesson.id}
-                    lesson={lesson}
-                    studentsById={studentsById}
-                    language={data.settings.language}
-                    currencyFormatter={currencyFormatter}
-                    onEdit={() => openLessonEditor(lesson)}
-                    onStatusChange={updateLessonStatus}
-                    onDuplicate={duplicateLesson}
-                  />
-                ))}
               </SectionCard>
 
               <SectionCard
@@ -1006,17 +1026,6 @@ export default function App() {
                 </View>
               </SectionCard>
 
-              <SectionCard
-                title="Быстрый сценарий доп. уроков"
-                subtitle="Минимум действий для оперативных изменений расписания."
-              >
-                <Text style={styles.supportText}>
-                  Оставляйте будущие уроки в статусе Запланирован. Отмечайте Проведен только после фактического занятия.
-                </Text>
-                <Text style={styles.supportText}>
-                  Для дополнительного урока: дублируйте похожее занятие, сдвиньте дату/время и внесите оплату в один клик.
-                </Text>
-              </SectionCard>
             </>
           ) : null}
 
@@ -1062,6 +1071,8 @@ export default function App() {
                     const isCurrentMonth = gridDay.getMonth() === calendarMonth.getMonth();
                     const isSelected = selectedCalendarDate === dateToken;
                     const isToday = dateToken === toDateToken(new Date());
+                    const hasCancelledLesson = dayLessons.some((lesson) => lesson.status === 'cancelled');
+                    const hasRescheduledLesson = dayLessons.some((lesson) => lesson.status === 'rescheduled');
 
                     return (
                       <Pressable
@@ -1069,6 +1080,8 @@ export default function App() {
                         style={[
                           styles.calendarCell,
                           !isCurrentMonth && styles.calendarCellMuted,
+                          hasCancelledLesson && styles.calendarCellCancelled,
+                          hasRescheduledLesson && styles.calendarCellRescheduled,
                           isSelected && styles.calendarCellSelected,
                         ]}
                         onPress={() => {
@@ -1227,7 +1240,7 @@ export default function App() {
                     selected={selectedFinanceStudentId === null}
                     onPress={() => setSelectedFinanceStudentId(null)}
                   />
-                  {data.students.map((student) => (
+                  {activeStudents.map((student) => (
                     <Pill
                       key={student.id}
                       label={student.name}
@@ -1240,7 +1253,7 @@ export default function App() {
               </SectionCard>
 
               <SectionCard title="Статусы оплат" subtitle="Мгновенно видно, кто оплатил, кто частично, а у кого долг.">
-                {data.students
+                {activeStudents
                   .filter((student) => selectedFinanceStudentId === null || student.id === selectedFinanceStudentId)
                   .map((student) => {
                   const overview = studentPaymentOverview[student.id];
@@ -1440,14 +1453,7 @@ export default function App() {
             placeholder="60"
             keyboardType="numeric"
           />
-          <Field
-            label="Стоимость для одного ученика (MDL)"
-            value={lessonDraft.costPerStudent}
-            onChangeText={(value) => setLessonDraft((current) => ({ ...current, costPerStudent: value }))}
-            placeholder="40"
-            keyboardType="numeric"
-          />
-          <Text style={styles.selectorTitle}>Ученики</Text>
+          <Text style={styles.selectorTitle}>Ученик</Text>
           <View style={styles.chipWrap}>
             {data.students
               .filter((student) => !student.isArchived)
@@ -1461,15 +1467,14 @@ export default function App() {
                     onPress={() =>
                       setLessonDraft((current) => ({
                         ...current,
-                        studentIds: selected
-                          ? current.studentIds.filter((id) => id !== student.id)
-                          : [...current.studentIds, student.id],
+                        studentIds: selected ? [] : [student.id],
                       }))
                     }
                   />
                 );
               })}
           </View>
+          <Text style={styles.supportText}>Цена урока берется из ставки выбранного ученика. Без выбора урок сохраняется как резерв.</Text>
           <Text style={[styles.conflictText, lessonConflicts.length === 0 ? styles.freeTimeText : styles.busyTimeText]}>
             {lessonConflicts.length === 0
               ? 'Выбранное время свободно.'
@@ -1575,7 +1580,7 @@ export default function App() {
 
           <Text style={styles.selectorTitle}>Статус</Text>
           <View style={styles.chipWrap}>
-            {(['planned', 'done', 'missed'] as Lesson['status'][]).map((status) => (
+            {(['scheduled', 'completed', 'cancelled', 'rescheduled'] as Lesson['status'][]).map((status) => (
               <Pill
                 key={status}
                 label={formatLessonStatusLabel(status)}
@@ -1598,7 +1603,7 @@ export default function App() {
         <ModalCard title={editingPaymentId ? 'Редактировать оплату' : 'Добавить оплату'} onClose={closePaymentModal}>
           <Text style={styles.selectorTitle}>Ученик</Text>
           <View style={styles.chipWrap}>
-            {data.students.map((student) => (
+            {activeStudents.map((student) => (
               <Pill
                 key={student.id}
                 label={student.name}
@@ -1647,38 +1652,80 @@ export default function App() {
         onRequestClose={() => setDayLessonsModalOpen(false)}
       >
         <ModalCard
-          title={`Уроки на ${formatShortDate(`${selectedCalendarDate}T00:00:00`, 'ru-RU')}`}
+          title={`Расписание: ${formatShortDate(`${selectedCalendarDate}T00:00:00`, 'ru-RU')}`}
           onClose={() => setDayLessonsModalOpen(false)}
         >
-          {selectedDayStudentEntries.length === 0 ? (
-            <Text style={styles.noteText}>На выбранную дату уроков нет.</Text>
-          ) : (
-            selectedDayStudentEntries.map((entry) => (
-              <View key={entry.key} style={styles.paymentRow}>
-                <View>
-                  <View style={styles.calendarLessonTitleRow}>
-                    <View style={[styles.calendarDot, { backgroundColor: entry.markerColor }]} />
-                    <Text style={styles.financeName}>{entry.studentName}</Text>
+          <Text style={styles.supportText}>Нажмите на свободное время, чтобы создать урок или резерв.</Text>
+          <View style={styles.dayScheduleTimeline}>
+            {DAY_SCHEDULE_HOURS.map((hour) => {
+              const hourLabel = `${String(hour).padStart(2, '0')}:00`;
+              const hourLessons = selectedDayLessons.filter((lesson) => new Date(lesson.startAt).getHours() === hour);
+
+              return (
+                <View key={hourLabel} style={styles.dayScheduleRow}>
+                  <Text style={styles.dayScheduleHour}>{hourLabel}</Text>
+                  <View style={styles.dayScheduleSlot}>
+                    {hourLessons.length === 0 ? (
+                      <Pressable
+                        onPress={() => {
+                          setDayLessonsModalOpen(false);
+                          openLessonEditor(undefined, { date: selectedCalendarDate, time: hourLabel });
+                        }}
+                        style={styles.dayScheduleEmptySlot}
+                      >
+                        <Text style={styles.dayScheduleEmptyText}>Свободно</Text>
+                      </Pressable>
+                    ) : (
+                      hourLessons.map((lesson) => {
+                        const student = lesson.studentIds[0] ? studentsById[lesson.studentIds[0]] : undefined;
+                        const time = new Intl.DateTimeFormat('ru-RU', {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        }).format(new Date(lesson.startAt));
+
+                        return (
+                          <View key={lesson.id} style={styles.dayScheduleLesson}>
+                            <Pressable
+                              onPress={() => {
+                                setDayLessonsModalOpen(false);
+                                openLessonEditor(lesson);
+                              }}
+                              style={styles.dayScheduleLessonMain}
+                            >
+                              <Text style={styles.dayScheduleLessonTitle}>{lesson.title}</Text>
+                              <Text style={styles.dayScheduleLessonMeta}>
+                                {time} · {lesson.durationMinutes} мин · {student?.name ?? 'Резерв без ученика'}
+                              </Text>
+                              <Text
+                                style={[
+                                  styles.dayScheduleStatus,
+                                  lesson.status === 'completed' && styles.dayScheduleStatusCompleted,
+                                  lesson.status === 'cancelled' && styles.dayScheduleStatusCancelled,
+                                  lesson.status === 'rescheduled' && styles.dayScheduleStatusRescheduled,
+                                ]}
+                              >
+                                {formatLessonStatusLabel(lesson.status)}
+                              </Text>
+                            </Pressable>
+                            <View style={styles.dayScheduleActions}>
+                              <SmallAction
+                                label="Изменить"
+                                onPress={() => {
+                                  setDayLessonsModalOpen(false);
+                                  openLessonEditor(lesson);
+                                }}
+                              />
+                              <SmallAction label="Удалить" onPress={() => deleteLesson(lesson.id)} />
+                            </View>
+                          </View>
+                        );
+                      })
+                    )}
                   </View>
-                  <Text style={styles.financeMeta}>
-                    {entry.lessonTitle} • {entry.lessonTime}
-                  </Text>
                 </View>
-                <Text
-                  style={[
-                    styles.statusBadge,
-                    entry.status === 'paid'
-                      ? styles.statusPaid
-                      : entry.status === 'partial'
-                      ? styles.statusPartial
-                      : styles.statusOutstanding,
-                  ]}
-                >
-                  {entry.status === 'paid' ? 'Оплачено' : entry.status === 'partial' ? 'Частично оплачено' : 'Есть долг'}
-                </Text>
-              </View>
-            ))
-          )}
+              );
+            })}
+          </View>
         </ModalCard>
       </Modal>
 
@@ -1882,7 +1929,7 @@ function LessonCard({
         </Pressable>
       </View>
       <View style={styles.chipWrap}>
-        {(['planned', 'done', 'missed'] as Lesson['status'][]).map((status) => (
+        {(['scheduled', 'completed', 'cancelled', 'rescheduled'] as Lesson['status'][]).map((status) => (
           <Pill
             key={status}
             label={formatLessonStatusLabel(status)}
@@ -2336,6 +2383,12 @@ const styles = StyleSheet.create({
   calendarCellSelected: {
     backgroundColor: '#e7f0ff',
   },
+  calendarCellCancelled: {
+    backgroundColor: '#fff0f0',
+  },
+  calendarCellRescheduled: {
+    backgroundColor: '#fff7e8',
+  },
   calendarCellDay: {
     color: '#17344e',
     fontSize: 14,
@@ -2353,6 +2406,86 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flexWrap: 'wrap',
     gap: 4,
+  },
+  dayScheduleTimeline: {
+    marginTop: 12,
+    borderTopWidth: 1,
+    borderColor: '#e1ebf2',
+  },
+  dayScheduleRow: {
+    flexDirection: 'row',
+    minHeight: 74,
+    borderBottomWidth: 1,
+    borderColor: '#e1ebf2',
+  },
+  dayScheduleHour: {
+    width: 52,
+    paddingTop: 12,
+    color: '#6b8293',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  dayScheduleSlot: {
+    flex: 1,
+    borderLeftWidth: 1,
+    borderColor: '#e1ebf2',
+    paddingVertical: 6,
+    paddingLeft: 10,
+  },
+  dayScheduleEmptySlot: {
+    flex: 1,
+    minHeight: 60,
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    borderColor: '#c8d9e6',
+    backgroundColor: '#f8fbfd',
+  },
+  dayScheduleEmptyText: {
+    color: '#6b8293',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  dayScheduleLesson: {
+    borderLeftWidth: 4,
+    borderColor: '#2ea3a1',
+    borderRadius: 8,
+    backgroundColor: '#e8f6f5',
+    padding: 10,
+  },
+  dayScheduleLessonMain: {
+    gap: 3,
+  },
+  dayScheduleLessonTitle: {
+    color: '#17344e',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  dayScheduleLessonMeta: {
+    color: '#527086',
+    fontSize: 12,
+  },
+  dayScheduleStatus: {
+    color: '#1d5fcf',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  dayScheduleStatusCompleted: {
+    color: '#176d68',
+  },
+  dayScheduleStatusCancelled: {
+    color: '#b83d4b',
+  },
+  dayScheduleStatusRescheduled: {
+    color: '#a26200',
+  },
+  dayScheduleActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 10,
   },
   calendarStrip: {
     flexDirection: 'row',
