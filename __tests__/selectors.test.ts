@@ -122,6 +122,7 @@ describe('tutor domain selectors', () => {
         lessonDate: '2026-06-27',
         lessonTime: '11:45',
         durationMinutes: '45',
+        anonymousPrice: '0',
         status: 'scheduled',
         studentIds: ['student-alex'],
         note: '',
@@ -141,6 +142,7 @@ describe('tutor domain selectors', () => {
         lessonDate: '2026-06-26',
         lessonTime: '16:00',
         durationMinutes: '60',
+        anonymousPrice: '0',
         status: 'scheduled',
         studentIds: [],
         note: '',
@@ -161,8 +163,40 @@ describe('tutor domain selectors', () => {
     expect(dashboard.upcomingLessons).toHaveLength(1);
   });
 
+  it('includes anonymous lesson payments in income without changing a student balance', () => {
+    const anonymousLesson = {
+      id: 'lesson-anonymous-paid',
+      title: 'Anonymous conversation practice',
+      startAt: '2026-06-26T18:00:00',
+      durationMinutes: 60,
+      costPerStudent: 80,
+      status: 'completed_paid' as const,
+      studentIds: [],
+      note: '',
+    };
+    const anonymousPayment = {
+      id: 'payment-anonymous-paid',
+      studentId: null,
+      lessonId: anonymousLesson.id,
+      amount: 80,
+      paidAt: '2026-06-26',
+      kind: 'payment' as const,
+      note: 'Anonymous lesson payment',
+    };
+    const dataWithAnonymousPayment: AppData = {
+      ...testData,
+      lessons: [...testData.lessons, anonymousLesson],
+      payments: [...testData.payments, anonymousPayment],
+    };
+
+    const dashboard = deriveDashboard(dataWithAnonymousPayment, new Date('2026-06-26T08:00:00.000Z'));
+    expect(dashboard.monthIncome).toBe(360);
+    expect(dashboard.monthBilled).toBe(50);
+    expect(calculateBalance(testData.students[0], dataWithAnonymousPayment.lessons, dataWithAnonymousPayment.payments)).toBe(200);
+  });
+
   it('parses lesson date and time into an iso string', () => {
-    expect(parseLessonStart('2026-06-30', '17:15')).toContain('2026-06-30T');
+    expect(parseLessonStart('2026-06-30', '17:15')).toBe('2026-06-30T17:15:00');
     expect(parseLessonStart('invalid', '17:15')).toBeNull();
   });
 

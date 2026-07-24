@@ -27,7 +27,9 @@ export function isValidLessonDraft(draft: LessonDraft): boolean {
 }
 
 export function lessonChargeForStudent(lesson: Lesson, studentId: string): number {
-  return lesson.status === 'completed' && lesson.studentIds.includes(studentId) ? lesson.costPerStudent : 0;
+  return (lesson.status === 'completed' || lesson.status === 'completed_paid') && lesson.studentIds.includes(studentId)
+    ? lesson.costPerStudent
+    : 0;
 }
 
 export function calculateBalance(student: Student, lessons: Lesson[], payments: Payment[]): number {
@@ -95,7 +97,11 @@ export function deriveDashboard(data: AppData, now: Date) {
     .filter((payment) => payment.paidAt.startsWith(monthToken))
     .reduce((total, payment) => total + payment.amount, 0);
   const monthBilled = activeLessons
-    .filter((lesson) => lesson.startAt.startsWith(monthToken) && lesson.status === 'completed')
+    .filter(
+      (lesson) =>
+        lesson.startAt.startsWith(monthToken) &&
+        (lesson.status === 'completed' || lesson.status === 'completed_paid'),
+    )
     .reduce((total, lesson) => total + lesson.costPerStudent * lesson.studentIds.length, 0);
 
   return {
@@ -107,7 +113,9 @@ export function deriveDashboard(data: AppData, now: Date) {
     monthBilled,
     upcomingLessons,
     todayLessons,
-    doneLessonsCount: activeLessons.filter((lesson) => lesson.status === 'completed').length,
+    doneLessonsCount: activeLessons.filter(
+      (lesson) => lesson.status === 'completed' || lesson.status === 'completed_paid',
+    ).length,
     missedLessonsCount: activeLessons.filter((lesson) => lesson.status === 'cancelled').length,
     plannedLessonsCount: activeLessons.filter((lesson) => lesson.status === 'scheduled').length,
     calendarDays,

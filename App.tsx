@@ -1,12 +1,11 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { LinearGradient } from 'expo-linear-gradient';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   Alert,
   Modal,
   Pressable,
-  SafeAreaView,
   ScrollView,
   StyleSheet,
   Switch,
@@ -14,6 +13,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   STORAGE_KEY,
   createEmptyLessonDraft,
@@ -67,7 +67,13 @@ const RECURRENCE_PRESETS = [
 ] as const;
 const STUDENT_MARKER_COLORS = ['#2667ff', '#ff7a59', '#1fa774', '#9a4dff', '#eb5757', '#f0a202', '#0ea5a0', '#7c4d2b'];
 const ANONYMOUS_LESSON_COLOR = '#6b7280';
-const DAY_SCHEDULE_HOURS = Array.from({ length: 16 }, (_, index) => index + 7);
+const TAB_ICONS: Record<ScreenTab, keyof typeof Ionicons.glyphMap> = {
+  dashboard: 'stats-chart-outline',
+  schedule: 'calendar-outline',
+  students: 'people-outline',
+  finances: 'card-outline',
+  settings: 'settings-outline',
+};
 
 type PaymentStatus = 'paid' | 'partial' | 'outstanding';
 
@@ -149,10 +155,35 @@ function formatLessonStatusLabel(status: Lesson['status']): string {
   if (status === 'completed') {
     return 'Проведен';
   }
+  if (status === 'completed_paid') {
+    return 'Проведен и оплачен';
+  }
   if (status === 'cancelled') {
     return 'Отменен';
   }
   return 'Перенесен';
+}
+
+function formatLessonTime(isoValue: string): string {
+  return new Intl.DateTimeFormat('ru-RU', {
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(isoValue));
+}
+
+function lessonEndAt(lesson: Lesson): string {
+  const end = new Date(lesson.startAt);
+  end.setMinutes(end.getMinutes() + lesson.durationMinutes);
+  const year = end.getFullYear();
+  const month = String(end.getMonth() + 1).padStart(2, '0');
+  const day = String(end.getDate()).padStart(2, '0');
+  const hour = String(end.getHours()).padStart(2, '0');
+  const minute = String(end.getMinutes()).padStart(2, '0');
+  return `${year}-${month}-${day}T${hour}:${minute}:00`;
+}
+
+function formatLessonTimeRange(lesson: Lesson): string {
+  return `${formatLessonTime(lesson.startAt)} - ${formatLessonTime(lessonEndAt(lesson))}`;
 }
 
 function normalizeStoredLesson(lesson: Lesson): Lesson {
@@ -255,6 +286,7 @@ export default function App() {
   const [reschedulingLessonId, setReschedulingLessonId] = useState<string | null>(null);
   const [rescheduleDate, setRescheduleDate] = useState(toDateToken(new Date()));
   const [rescheduleTime, setRescheduleTime] = useState('16:00');
+  const [deleteConfirmationLessonId, setDeleteConfirmationLessonId] = useState<string | null>(null);
   const [automationStatus, setAutomationStatus] = useState(initialAutomationStatus);
 
   useEffect(() => {
@@ -371,7 +403,9 @@ export default function App() {
     ? [selectedFinanceStudentId]
     : activeStudents.map((student) => student.id);
   const filteredPayments = data.payments
-    .filter((payment) => financeStudentIds.includes(payment.studentId))
+    .filter((payment) =>
+      selectedFinanceStudentId ? payment.studentId === selectedFinanceStudentId : payment.studentId === null || financeStudentIds.includes(payment.studentId),
+    )
     .sort((left, right) => right.paidAt.localeCompare(left.paidAt));
   const filteredIncome = filteredPayments.reduce((total, payment) => total + payment.amount, 0);
   const lessonConflicts = useMemo(
@@ -483,21 +517,32 @@ export default function App() {
     [studentColorById, studentPaymentOverview, studentsById, todayLessons],
   );
 
-  const hasTimeslotConflict = (
+  const findTimeslotConflict = (
     lessons: Lesson[],
     startAt: string,
+    durationMinutes: number,
     excludeLessonId?: string | null,
     excludeRecurrenceId?: string | null,
-  ) => {
-    return lessons.some((lesson) => {
+  ): Lesson | undefined => {
+    const slotStart = new Date(startAt).getTime();
+    const slotEnd = slotStart + durationMinutes * 60 * 1000;
+    return lessons.find((lesson) => {
       if (excludeLessonId && lesson.id === excludeLessonId) {
         return false;
       }
       if (excludeRecurrenceId && lesson.recurrenceId === excludeRecurrenceId) {
         return false;
       }
-      return areSameTimeslot(lesson.startAt, startAt);
+      const lessonStart = new Date(lesson.startAt).getTime();
+      const lessonEnd = lessonStart + lesson.durationMinutes * 60 * 1000;
+      return slotStart < lessonEnd && slotEnd > lessonStart;
     });
+  };
+
+  const describeConflict = (lesson: Lesson): string => {
+    const studentId = lesson.studentIds[0];
+    const studentName = studentId ? studentsById[studentId]?.name ?? 'Неизвестный ученик' : 'Анонимный урок';
+    return `${studentName} (${formatLessonTimeRange(lesson)})`;
   };
 
   const upsertStudent = () => {
@@ -551,7 +596,7 @@ export default function App() {
       title: lessonDraft.title.trim(),
       startAt,
       durationMinutes: Number(lessonDraft.durationMinutes) || 60,
-      costPerStudent: selectedStudent?.defaultRate ?? 0,
+      costPerStudent: selectedStudent?.defaultRate ?? Math.max(0, Number(lessonDraft.anonymousPrice) || 0),
       status: lessonDraft.status,
       studentIds: selectedStudentId ? [selectedStudentId] : [],
       note: lessonDraft.note.trim(),
@@ -561,8 +606,8 @@ export default function App() {
       recurrenceStartDate: null,
     };
 
-    if (hasTimeslotConflict(scheduledLessons, nextLesson.startAt, editingLessonId, null)) {
-      Alert.alert('Слот уже занят', 'На это время уже запланирован другой урок. Выберите другое время.');
+    if (lessonConflicts.length > 0) {
+      Alert.alert('Пересечение в расписании', `Урок пересекается с ${describeConflict(lessonConflicts[0])}.`);
       return;
     }
 
@@ -587,14 +632,25 @@ export default function App() {
         if (!recurringStart) {
           continue;
         }
-        const conflict = hasTimeslotConflict(
+        const existingConflict = findTimeslotConflict(
           scheduledLessons,
           recurringStart,
+          nextLesson.durationMinutes,
           editingLessonId,
           editingLessonId ? recurrenceId : null,
-        ) || plannedLessons.some((lesson) => areSameTimeslot(lesson.startAt, recurringStart));
-        if (conflict) {
-          Alert.alert('Слот уже занят', `Урок на ${dateToken} ${lessonDraft.lessonTime} не создан: время уже занято.`);
+        );
+        const plannedConflict = plannedLessons.find((lesson) => {
+          const currentStart = new Date(recurringStart).getTime();
+          const currentEnd = currentStart + nextLesson.durationMinutes * 60 * 1000;
+          const plannedStart = new Date(lesson.startAt).getTime();
+          const plannedEnd = plannedStart + lesson.durationMinutes * 60 * 1000;
+          return currentStart < plannedEnd && currentEnd > plannedStart;
+        });
+        if (existingConflict || plannedConflict) {
+          Alert.alert(
+            'Пересечение в расписании',
+            `Урок на ${dateToken} ${lessonDraft.lessonTime} пересекается с ${describeConflict(existingConflict ?? plannedConflict!)}.`,
+          );
           return;
         }
 
@@ -748,6 +804,7 @@ export default function App() {
         lessonDate: datePart,
         lessonTime: timePartWithSeconds.slice(0, 5),
         durationMinutes: String(lesson.durationMinutes),
+        anonymousPrice: String(lesson.costPerStudent),
         studentIds: lesson.studentIds.slice(0, 1),
         note: lesson.note,
         status: lesson.status,
@@ -786,7 +843,7 @@ export default function App() {
     setPaymentDraft(
       payment
         ? {
-            studentId: payment.studentId,
+          studentId: payment.studentId ?? '',
             amount: String(payment.amount),
             paidAt: payment.paidAt,
             kind: payment.kind,
@@ -834,6 +891,35 @@ export default function App() {
     }));
   };
 
+  const completeAnonymousLessonAndRecordPayment = (lessonId: string) => {
+    setData((current) => {
+      const lesson = current.lessons.find((item) => item.id === lessonId);
+      if (!lesson || lesson.studentIds.length > 0) {
+        return current;
+      }
+      const hasLinkedPayment = current.payments.some((payment) => payment.lessonId === lesson.id);
+      const payment: Payment | null = hasLinkedPayment
+        ? null
+        : {
+            id: `payment-${Date.now()}-anonymous`,
+            studentId: null,
+            lessonId: lesson.id,
+            amount: lesson.costPerStudent,
+            paidAt: lesson.startAt.slice(0, 10),
+            kind: 'payment',
+            note: `Оплата анонимного урока: ${lesson.title}`,
+          };
+
+      return {
+        ...current,
+        lessons: current.lessons.map((item) =>
+          item.id === lesson.id ? { ...item, status: 'completed_paid' } : item,
+        ),
+        payments: payment ? [payment, ...current.payments] : current.payments,
+      };
+    });
+  };
+
   const openRescheduleDialog = (lesson: Lesson) => {
     const [date, timeWithSeconds] = lesson.startAt.split('T');
     setReschedulingLessonId(lesson.id);
@@ -849,6 +935,10 @@ export default function App() {
       openRescheduleDialog(lesson);
       return;
     }
+    if (status === 'completed_paid') {
+      completeAnonymousLessonAndRecordPayment(lesson.id);
+      return;
+    }
     updateLessonStatus(lesson.id, status);
   };
 
@@ -862,8 +952,22 @@ export default function App() {
       Alert.alert('Некорректные дата или время', 'Используйте форматы YYYY-MM-DD и HH:mm.');
       return;
     }
-    if (hasTimeslotConflict(scheduledLessons, startAt, originalLesson.id, null)) {
-      Alert.alert('Слот уже занят', 'На выбранное время уже назначен другой урок.');
+    const rescheduleConflicts = findLessonConflicts(
+      {
+        title: originalLesson.title,
+        lessonDate: rescheduleDate,
+        lessonTime: rescheduleTime,
+        durationMinutes: String(originalLesson.durationMinutes),
+        anonymousPrice: String(originalLesson.costPerStudent),
+        status: 'scheduled',
+        studentIds: originalLesson.studentIds,
+        note: originalLesson.note,
+      },
+      scheduledLessons,
+      originalLesson.id,
+    );
+    if (rescheduleConflicts.length > 0) {
+      Alert.alert('Пересечение в расписании', `Урок пересекается с ${describeConflict(rescheduleConflicts[0])}.`);
       return;
     }
 
@@ -891,23 +995,24 @@ export default function App() {
     setReschedulingLessonId(null);
   };
 
-  const deleteLesson = (lessonId: string) => {
-    Alert.alert('Удалить урок?', 'Урок будет удален из календаря. Это действие нельзя отменить.', [
-      { text: 'Отмена', style: 'cancel' },
-      {
-        text: 'Удалить',
-        style: 'destructive',
-        onPress: () => {
-          setData((current) => ({
-            ...current,
-            lessons: current.lessons.filter((lesson) => lesson.id !== lessonId),
-          }));
-          if (editingLessonId === lessonId) {
-            closeLessonModal();
-          }
-        },
-      },
-    ]);
+  const requestLessonDeletion = (lessonId: string) => {
+    setDeleteConfirmationLessonId(lessonId);
+  };
+
+  const confirmLessonDeletion = () => {
+    if (!deleteConfirmationLessonId) {
+      return;
+    }
+    const lessonId = deleteConfirmationLessonId;
+    setData((current) => ({
+      ...current,
+      lessons: current.lessons.filter((lesson) => lesson.id !== lessonId),
+      payments: current.payments.filter((payment) => payment.lessonId !== lessonId),
+    }));
+    setDeleteConfirmationLessonId(null);
+    if (editingLessonId === lessonId) {
+      closeLessonModal();
+    }
   };
 
   const toggleStudentArchive = (studentId: string) => {
@@ -938,7 +1043,7 @@ export default function App() {
   };
 
   const tabLabels: Record<ScreenTab, string> = {
-    dashboard: 'Обзор',
+    dashboard: 'Статистика',
     schedule: 'Календарь',
     students: 'Ученики',
     finances: 'Оплаты',
@@ -946,32 +1051,15 @@ export default function App() {
   };
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <StatusBar style="light" />
-      <LinearGradient colors={['#123c69', '#1f6f78', '#2ea3a1']} style={styles.hero}>
-        <View style={styles.heroMetrics}>
-          <MetricBadge label="Доход за месяц" value={formatCurrency(dashboard.monthIncome, currencyFormatter)} />
-          <MetricBadge label="Должники" value={String(dashboard.debtorCount)} />
-          <MetricBadge label="Предстоящие" value={String(dashboard.upcomingLessons.length)} />
-        </View>
-      </LinearGradient>
-
-      <View style={styles.shell}>
-        <View style={styles.tabBar}>
-          {(['dashboard', 'schedule', 'students', 'finances', 'settings'] as ScreenTab[]).map((tab) => (
-            <Pressable
-              key={tab}
-              onPress={() => setActiveTab(tab)}
-              style={[styles.tabButton, activeTab === tab && styles.tabButtonActive]}
-            >
-              <Text style={[styles.tabButtonText, activeTab === tab && styles.tabButtonTextActive]}>
-                {tabLabels[tab]}
-              </Text>
-            </Pressable>
-          ))}
+    <SafeAreaProvider>
+      <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
+        <StatusBar style="dark" />
+        <View style={styles.pageHeader}>
+          <Text style={styles.pageHeaderTitle}>{tabLabels[activeTab]}</Text>
         </View>
 
-        <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+        <View style={styles.shell}>
+          <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
           {activeTab === 'dashboard' ? (
             <>
               <View style={styles.grid}>
@@ -997,7 +1085,7 @@ export default function App() {
                 />
               </View>
 
-              <SectionCard title="Уроки на сегодня" subtitle="Фокус на сегодняшнем дне и быстрых действиях.">
+              <SectionCard title="Уроки на сегодня">
                 {todayStudentEntries.length === 0 ? (
                   <Text style={styles.noteText}>На сегодня уроков нет.</Text>
                 ) : (
@@ -1038,7 +1126,7 @@ export default function App() {
                 )}
               </SectionCard>
 
-              <SectionCard title="Посещаемость и финансы" subtitle="Сводка по всем ученикам.">
+              <SectionCard title="Посещаемость и финансы">
                 <RowLabelValue label="Проведенные уроки" value={String(dashboard.doneLessonsCount)} />
                 <RowLabelValue label="Пропущенные уроки" value={String(dashboard.missedLessonsCount)} />
                 <RowLabelValue label="Запланированные уроки" value={String(dashboard.plannedLessonsCount)} />
@@ -1048,75 +1136,17 @@ export default function App() {
                 />
               </SectionCard>
 
-              <SectionCard
-                title="Напоминания"
-                subtitle="Управляйте локальными напоминаниями."
-              >
-                <RowLabelValue label="Доступ к уведомлениям" value={formatPermissionLabel(automationStatus.notificationPermission)} />
-                <RowLabelValue
-                  label="Напоминания об уроках"
-                  value={String(automationStatus.scheduledLessonReminderCount)}
-                />
-                <RowLabelValue
-                  label="Напоминание о балансе"
-                  value={automationStatus.lowBalanceReminderScheduled ? 'Ежедневно в 08:00' : 'Не запланировано'}
-                />
-                <View style={styles.switchRow}>
-                  <Text style={styles.switchLabel}>Напоминания об уроках</Text>
-                  <Switch
-                    value={data.settings.lessonRemindersEnabled}
-                    onValueChange={(value) => updateSettings({ lessonRemindersEnabled: value })}
-                  />
-                </View>
-                <Field
-                  label="Минут до урока"
-                  value={String(data.settings.reminderMinutesBeforeLesson)}
-                  onChangeText={(value) =>
-                    updateSettings({ reminderMinutesBeforeLesson: Math.max(5, Number(value) || 5) })
-                  }
-                  placeholder="45"
-                  keyboardType="numeric"
-                />
-                <View style={styles.switchRow}>
-                  <Text style={styles.switchLabel}>Напоминания о низком балансе</Text>
-                  <Switch
-                    value={data.settings.lowBalanceRemindersEnabled}
-                    onValueChange={(value) => updateSettings({ lowBalanceRemindersEnabled: value })}
-                  />
-                </View>
-                <Field
-                  label="Порог низкого баланса"
-                  value={String(data.settings.lowBalanceThreshold)}
-                  onChangeText={(value) =>
-                    updateSettings({ lowBalanceThreshold: Math.max(-9999, Number(value) || 0) })
-                  }
-                  placeholder="20"
-                  keyboardType="numeric"
-                />
-                <Text style={styles.supportText}>{automationStatus.pushTokenHint}</Text>
-                {automationStatus.expoPushToken ? (
-                  <Text selectable style={styles.tokenText}>
-                    {automationStatus.expoPushToken}
-                  </Text>
-                ) : null}
-                <View style={styles.inlineActions}>
-                  <SmallAction label="Включить уведомления" onPress={() => void enableNotificationsAndPush()} />
-                </View>
-              </SectionCard>
-
             </>
           ) : null}
 
           {activeTab === 'schedule' ? (
             <>
               <ActionHeader
-                title="Расписание занятий"
-                subtitle="Выбирайте день и сразу открывайте занятия в отдельном окне."
                 actionLabel="Добавить урок"
                 onAction={() => openLessonEditor()}
               />
 
-              <SectionCard title="Календарь на месяц" subtitle="Нажмите день, чтобы открыть список уроков и статусов оплаты.">
+              <SectionCard title="Календарь на месяц">
                 <View style={styles.calendarMonthHeader}>
                   <SmallAction
                     label="← Месяц"
@@ -1213,37 +1243,12 @@ export default function App() {
                 </View>
               </SectionCard>
 
-              <SectionCard
-                title="Уроки выбранного дня"
-                subtitle={formatShortDate(`${selectedCalendarDate}T00:00:00`, 'ru-RU')}
-              >
-                {selectedDayLessons.length === 0 ? (
-                  <Text style={styles.noteText}>На выбранный день уроков нет.</Text>
-                ) : (
-                  selectedDayLessons.map((lesson) => (
-                    <ScheduleLessonCard
-                      key={`selected-${lesson.id}`}
-                      lesson={lesson}
-                      student={lesson.studentIds[0] ? studentsById[lesson.studentIds[0]] : undefined}
-                      statusMenuOpen={statusMenuLessonId === lesson.id}
-                      onToggleStatus={() =>
-                        setStatusMenuLessonId((current) => (current === lesson.id ? null : lesson.id))
-                      }
-                      onStatusChange={(status) => handleQuickLessonStatusChange(lesson, status)}
-                      onEdit={() => openLessonEditor(lesson)}
-                      onDelete={() => deleteLesson(lesson.id)}
-                    />
-                  ))
-                )}
-              </SectionCard>
             </>
           ) : null}
 
           {activeTab === 'students' ? (
             <>
               <ActionHeader
-                title="Ученики"
-                subtitle="Контакты, баланс и быстрая запись оплаты прямо в карточке ученика."
                 actionLabel="Добавить ученика"
                 onAction={() => openStudentEditor()}
               />
@@ -1346,12 +1351,10 @@ export default function App() {
           {activeTab === 'finances' ? (
             <>
               <ActionHeader
-                title="Оплаты"
-                subtitle="Простая аналитика: начислено, оплачено, остаток, последняя и следующая оплата."
                 actionLabel="Добавить оплату"
                 onAction={() => openPaymentEditor()}
               />
-              <SectionCard title="Фильтр" subtitle="Показывайте общий поток оплат или одного ученика.">
+              <SectionCard title="Фильтр">
                 <View style={styles.chipWrap}>
                   <Pill
                     label="Все ученики"
@@ -1370,7 +1373,7 @@ export default function App() {
                 <RowLabelValue label="Получено оплат" value={formatCurrency(filteredIncome, currencyFormatter)} />
               </SectionCard>
 
-              <SectionCard title="Статусы оплат" subtitle="Мгновенно видно, кто оплатил, кто частично, а у кого долг.">
+              <SectionCard title="Статусы оплат">
                 {activeStudents
                   .filter((student) => selectedFinanceStudentId === null || student.id === selectedFinanceStudentId)
                   .map((student) => {
@@ -1407,12 +1410,12 @@ export default function App() {
                 })}
               </SectionCard>
 
-              <SectionCard title="История платежей" subtitle="Хронология всех оплат с датой и типом операции.">
+              <SectionCard title="История платежей">
                 {filteredPayments.map((payment) => (
                   <View key={payment.id} style={styles.paymentRow}>
                     <View>
                       <Text style={styles.financeName}>
-                        {studentsById[payment.studentId]?.name ?? 'Неизвестный ученик'}
+                        {payment.studentId ? studentsById[payment.studentId]?.name ?? 'Неизвестный ученик' : 'Анонимный урок'}
                       </Text>
                       <Text style={styles.financeMeta}>
                         {formatPaymentKindLabel(payment.kind)} • {formatShortDate(payment.paidAt, 'ru-RU')}
@@ -1434,13 +1437,11 @@ export default function App() {
           {activeTab === 'settings' ? (
             <>
               <ActionHeader
-                title="Настройки"
-                subtitle="Русская локализация и единая валюта MDL для всех финансовых экранов."
                 actionLabel="К обзору"
                 onAction={() => setActiveTab('dashboard')}
               />
 
-              <SectionCard title="Язык" subtitle="Интерфейс полностью локализован на русский язык.">
+              <SectionCard title="Язык">
                 <View style={styles.chipWrap}>
                   {languageOptions.map((language) => (
                     <Pill
@@ -1453,7 +1454,7 @@ export default function App() {
                 </View>
               </SectionCard>
 
-              <SectionCard title="Валюта" subtitle="Во всех расчетах используется молдавский лей (MDL).">
+              <SectionCard title="Валюта">
                 <View style={styles.chipWrap}>
                   {currencyOptions.map((currency) => (
                     <Pill
@@ -1465,10 +1466,82 @@ export default function App() {
                   ))}
                 </View>
               </SectionCard>
+
+              <SectionCard title="Напоминания">
+                <RowLabelValue label="Доступ к уведомлениям" value={formatPermissionLabel(automationStatus.notificationPermission)} />
+                <RowLabelValue
+                  label="Напоминания об уроках"
+                  value={String(automationStatus.scheduledLessonReminderCount)}
+                />
+                <RowLabelValue
+                  label="Напоминание о балансе"
+                  value={automationStatus.lowBalanceReminderScheduled ? 'Ежедневно в 08:00' : 'Не запланировано'}
+                />
+                <View style={styles.switchRow}>
+                  <Text style={styles.switchLabel}>Напоминания об уроках</Text>
+                  <Switch
+                    value={data.settings.lessonRemindersEnabled}
+                    onValueChange={(value) => updateSettings({ lessonRemindersEnabled: value })}
+                  />
+                </View>
+                <Field
+                  label="Минут до урока"
+                  value={String(data.settings.reminderMinutesBeforeLesson)}
+                  onChangeText={(value) =>
+                    updateSettings({ reminderMinutesBeforeLesson: Math.max(5, Number(value) || 5) })
+                  }
+                  placeholder="45"
+                  keyboardType="numeric"
+                />
+                <View style={styles.switchRow}>
+                  <Text style={styles.switchLabel}>Напоминания о низком балансе</Text>
+                  <Switch
+                    value={data.settings.lowBalanceRemindersEnabled}
+                    onValueChange={(value) => updateSettings({ lowBalanceRemindersEnabled: value })}
+                  />
+                </View>
+                <Field
+                  label="Порог низкого баланса"
+                  value={String(data.settings.lowBalanceThreshold)}
+                  onChangeText={(value) =>
+                    updateSettings({ lowBalanceThreshold: Math.max(-9999, Number(value) || 0) })
+                  }
+                  placeholder="20"
+                  keyboardType="numeric"
+                />
+                <Text style={styles.supportText}>{automationStatus.pushTokenHint}</Text>
+                {automationStatus.expoPushToken ? (
+                  <Text selectable style={styles.tokenText}>
+                    {automationStatus.expoPushToken}
+                  </Text>
+                ) : null}
+                <View style={styles.inlineActions}>
+                  <SmallAction label="Включить уведомления" onPress={() => void enableNotificationsAndPush()} />
+                </View>
+              </SectionCard>
             </>
           ) : null}
-        </ScrollView>
-      </View>
+          </ScrollView>
+
+          <SafeAreaView style={styles.tabBar} edges={['bottom', 'left', 'right']}>
+            {(['dashboard', 'schedule', 'students', 'finances', 'settings'] as ScreenTab[]).map((tab) => {
+              const isActive = activeTab === tab;
+              return (
+                <Pressable
+                  key={tab}
+                  accessibilityLabel={tabLabels[tab]}
+                  accessibilityRole="tab"
+                  accessibilityState={{ selected: isActive }}
+                  onPress={() => setActiveTab(tab)}
+                  style={[styles.tabButton, isActive && styles.tabButtonActive]}
+                >
+                  <Ionicons name={TAB_ICONS[tab]} size={22} color={isActive ? '#123c69' : '#688096'} />
+                  <Text style={[styles.tabButtonText, isActive && styles.tabButtonTextActive]}>{tabLabels[tab]}</Text>
+                </Pressable>
+              );
+            })}
+          </SafeAreaView>
+        </View>
 
       <Modal visible={studentModalOpen} animationType="slide" transparent onRequestClose={closeStudentModal}>
         <ModalCard title={editingStudentId ? 'Редактировать ученика' : 'Добавить ученика'} onClose={closeStudentModal}>
@@ -1543,7 +1616,23 @@ export default function App() {
       </Modal>
 
       <Modal visible={lessonModalOpen} animationType="slide" transparent onRequestClose={closeLessonModal}>
-        <ModalCard title={editingLessonId ? 'Редактировать урок' : 'Добавить урок'} onClose={closeLessonModal}>
+        <ModalCard
+          title={editingLessonId ? 'Редактировать урок' : 'Добавить урок'}
+          onClose={closeLessonModal}
+          footer={
+            <View style={styles.lessonEditorFooter}>
+              <SmallAction label="Отмена" onPress={closeLessonModal} />
+              <View style={styles.lessonEditorFooterMain}>
+                {editingLessonId ? (
+                  <Pressable style={styles.destructiveFooterButton} onPress={() => requestLessonDeletion(editingLessonId)}>
+                    <Text style={styles.destructiveFooterButtonText}>Удалить</Text>
+                  </Pressable>
+                ) : null}
+                <PrimaryButton label="Сохранить" onPress={upsertLesson} compact />
+              </View>
+            </View>
+          }
+        >
           <Field
             label="Название урока"
             value={lessonDraft.title}
@@ -1593,11 +1682,25 @@ export default function App() {
               })}
           </View>
           <Text style={styles.supportText}>Цена урока берется из ставки выбранного ученика. Без выбора урок сохраняется как резерв.</Text>
+          {lessonDraft.studentIds.length === 0 ? (
+            <Field
+              label="Цена анонимного урока (MDL)"
+              value={lessonDraft.anonymousPrice}
+              onChangeText={(value) => setLessonDraft((current) => ({ ...current, anonymousPrice: value }))}
+              placeholder="0"
+              keyboardType="numeric"
+            />
+          ) : null}
           <Text style={[styles.conflictText, lessonConflicts.length === 0 ? styles.freeTimeText : styles.busyTimeText]}>
             {lessonConflicts.length === 0
               ? 'Выбранное время свободно.'
-              : `Конфликт расписания: пересечений ${lessonConflicts.length}.`}
+              : `Пересечение с ${lessonConflicts.length} уроком(ами):`}
           </Text>
+          {lessonConflicts.map((lesson) => (
+            <Text key={lesson.id} style={styles.conflictDetailText}>
+              {describeConflict(lesson)}
+            </Text>
+          ))}
 
           <View style={styles.switchRow}>
             <Text style={styles.switchLabel}>Создать серию уроков</Text>
@@ -1713,7 +1816,28 @@ export default function App() {
             onChangeText={(value) => setLessonDraft((current) => ({ ...current, note: value }))}
             placeholder="Домашнее задание, аудитория, ссылка"
           />
-          <PrimaryButton label="Сохранить урок" onPress={upsertLesson} />
+        </ModalCard>
+      </Modal>
+
+      <Modal
+        visible={deleteConfirmationLessonId !== null}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setDeleteConfirmationLessonId(null)}
+      >
+        <ModalCard
+          title="Удалить урок?"
+          onClose={() => setDeleteConfirmationLessonId(null)}
+          footer={
+            <View style={styles.lessonEditorFooter}>
+              <SmallAction label="Отмена" onPress={() => setDeleteConfirmationLessonId(null)} />
+              <Pressable style={styles.destructiveFooterButton} onPress={confirmLessonDeletion}>
+                <Text style={styles.destructiveFooterButtonText}>Удалить урок</Text>
+              </Pressable>
+            </View>
+          }
+        >
+          <Text style={styles.supportText}>Урок будет удален из календаря, статистики и виджета. Это действие нельзя отменить.</Text>
         </ModalCard>
       </Modal>
 
@@ -1772,56 +1896,43 @@ export default function App() {
         <ModalCard
           title={`Расписание: ${formatShortDate(`${selectedCalendarDate}T00:00:00`, 'ru-RU')}`}
           onClose={() => setDayLessonsModalOpen(false)}
+          footer={
+            <PrimaryButton
+              label="Добавить урок"
+              onPress={() => {
+                setDayLessonsModalOpen(false);
+                openLessonEditor(undefined, { date: selectedCalendarDate, time: '16:00' });
+              }}
+            />
+          }
         >
-          <Text style={styles.supportText}>Нажмите на свободное время, чтобы создать урок или резерв.</Text>
-          <View style={styles.dayScheduleTimeline}>
-            {DAY_SCHEDULE_HOURS.map((hour) => {
-              const hourLabel = `${String(hour).padStart(2, '0')}:00`;
-              const hourLessons = selectedDayLessons.filter((lesson) => new Date(lesson.startAt).getHours() === hour);
-
-              return (
-                <View key={hourLabel} style={styles.dayScheduleRow}>
-                  <Text style={styles.dayScheduleHour}>{hourLabel}</Text>
-                  <View style={styles.dayScheduleSlot}>
-                    {hourLessons.length === 0 ? (
-                      <Pressable
-                        onPress={() => {
-                          setDayLessonsModalOpen(false);
-                          openLessonEditor(undefined, { date: selectedCalendarDate, time: hourLabel });
-                        }}
-                        style={styles.dayScheduleEmptySlot}
-                      >
-                        <Text style={styles.dayScheduleEmptyText}>Свободно</Text>
-                      </Pressable>
-                    ) : (
-                      hourLessons.map((lesson) => (
-                        <ScheduleLessonCard
-                          key={lesson.id}
-                          lesson={lesson}
-                          student={lesson.studentIds[0] ? studentsById[lesson.studentIds[0]] : undefined}
-                          statusMenuOpen={statusMenuLessonId === lesson.id}
-                          onToggleStatus={() =>
-                            setStatusMenuLessonId((current) => (current === lesson.id ? null : lesson.id))
-                          }
-                          onStatusChange={(status) => {
-                            if (status === 'rescheduled') {
-                              setDayLessonsModalOpen(false);
-                            }
-                            handleQuickLessonStatusChange(lesson, status);
-                          }}
-                          onEdit={() => {
-                            setDayLessonsModalOpen(false);
-                            openLessonEditor(lesson);
-                          }}
-                          onDelete={() => deleteLesson(lesson.id)}
-                        />
-                      ))
-                    )}
-                  </View>
-                </View>
-              );
-            })}
-          </View>
+          {selectedDayLessons.length === 0 ? (
+            <Text style={styles.noteText}>На выбранный день уроков нет.</Text>
+          ) : (
+            <View style={styles.dayLessonList}>
+              {selectedDayLessons.map((lesson) => (
+                <ScheduleLessonCard
+                  key={lesson.id}
+                  lesson={lesson}
+                  student={lesson.studentIds[0] ? studentsById[lesson.studentIds[0]] : undefined}
+                  statusMenuOpen={statusMenuLessonId === lesson.id}
+                  onToggleStatus={() =>
+                    setStatusMenuLessonId((current) => (current === lesson.id ? null : lesson.id))
+                  }
+                  onStatusChange={(status) => {
+                    if (status === 'rescheduled') {
+                      setDayLessonsModalOpen(false);
+                    }
+                    handleQuickLessonStatusChange(lesson, status);
+                  }}
+                  onEdit={() => {
+                    setDayLessonsModalOpen(false);
+                    openLessonEditor(lesson);
+                  }}
+                />
+              ))}
+            </View>
+          )}
         </ModalCard>
       </Modal>
 
@@ -1960,37 +2071,21 @@ export default function App() {
           </View>
         </ModalCard>
       </Modal>
-    </SafeAreaView>
+      </SafeAreaView>
+    </SafeAreaProvider>
   );
 }
 
 function ActionHeader({
-  title,
-  subtitle,
   actionLabel,
   onAction,
 }: {
-  title: string;
-  subtitle: string;
   actionLabel: string;
   onAction: () => void;
 }) {
   return (
     <View style={styles.actionHeader}>
-      <View style={styles.actionHeaderTextBlock}>
-        <Text style={styles.sectionTitle}>{title}</Text>
-        <Text style={styles.sectionSubtitle}>{subtitle}</Text>
-      </View>
       <PrimaryButton label={actionLabel} onPress={onAction} compact />
-    </View>
-  );
-}
-
-function MetricBadge({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={styles.metricBadge}>
-      <Text style={styles.metricBadgeLabel}>{label}</Text>
-      <Text style={styles.metricBadgeValue}>{value}</Text>
     </View>
   );
 }
@@ -2011,13 +2106,13 @@ function SectionCard({
   children,
 }: {
   title: string;
-  subtitle: string;
+  subtitle?: string;
   children: ReactNode;
 }) {
   return (
     <View style={styles.sectionCard}>
       <Text style={styles.sectionTitle}>{title}</Text>
-      <Text style={styles.sectionSubtitle}>{subtitle}</Text>
+      {subtitle ? <Text style={styles.sectionSubtitle}>{subtitle}</Text> : null}
       <View style={styles.sectionBody}>{children}</View>
     </View>
   );
@@ -2177,6 +2272,7 @@ function StatusButton({ status, onPress }: { status: Lesson['status']; onPress: 
       style={[
         styles.statusSelectorButton,
         status === 'completed' && styles.statusSelectorCompleted,
+        status === 'completed_paid' && styles.statusSelectorCompleted,
         status === 'cancelled' && styles.statusSelectorCancelled,
         status === 'rescheduled' && styles.statusSelectorRescheduled,
       ]}
@@ -2185,6 +2281,7 @@ function StatusButton({ status, onPress }: { status: Lesson['status']; onPress: 
         style={[
           styles.statusSelectorDot,
           status === 'completed' && styles.statusSelectorDotCompleted,
+          status === 'completed_paid' && styles.statusSelectorDotCompleted,
           status === 'cancelled' && styles.statusSelectorDotCancelled,
           status === 'rescheduled' && styles.statusSelectorDotRescheduled,
         ]}
@@ -2201,7 +2298,6 @@ function ScheduleLessonCard({
   onToggleStatus,
   onStatusChange,
   onEdit,
-  onDelete,
 }: {
   lesson: Lesson;
   student?: Student;
@@ -2209,10 +2305,11 @@ function ScheduleLessonCard({
   onToggleStatus: () => void;
   onStatusChange: (status: Lesson['status']) => void;
   onEdit: () => void;
-  onDelete: () => void;
 }) {
-  const time = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit' }).format(new Date(lesson.startAt));
   const studentLabel = student?.name ?? 'Анонимный урок';
+  const statusOptions: Lesson['status'][] = lesson.studentIds.length === 0
+    ? ['scheduled', 'completed', 'completed_paid', 'cancelled', 'rescheduled']
+    : ['scheduled', 'completed', 'cancelled', 'rescheduled'];
 
   return (
     <View style={[styles.scheduleLessonCard, { borderLeftColor: student?.color ?? ANONYMOUS_LESSON_COLOR }]}>
@@ -2223,17 +2320,16 @@ function ScheduleLessonCard({
             <Text style={styles.scheduleLessonStudent}>{studentLabel}</Text>
           </View>
           <Text style={styles.scheduleLessonTitle}>{lesson.title}</Text>
-          <Text style={styles.scheduleLessonMeta}>{time} · {lesson.durationMinutes} мин</Text>
+          <Text style={styles.scheduleLessonMeta}>{formatLessonTimeRange(lesson)} · {lesson.durationMinutes} мин</Text>
         </View>
         <StatusButton status={lesson.status} onPress={onToggleStatus} />
       </View>
       <View style={styles.dayScheduleActions}>
         <SmallAction label="Изменить" onPress={onEdit} />
-        <SmallAction label="Удалить" onPress={onDelete} />
       </View>
       {statusMenuOpen ? (
         <View style={styles.dayScheduleStatusMenu}>
-          {(['scheduled', 'completed', 'cancelled', 'rescheduled'] as Lesson['status'][]).map((status) => (
+          {statusOptions.map((status) => (
             <Pill
               key={status}
               label={formatLessonStatusLabel(status)}
@@ -2259,14 +2355,38 @@ function ModalCard({
   title,
   onClose,
   children,
+  footer,
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
+  footer?: ReactNode;
 }) {
   return (
+    <SafeAreaProvider>
+      <ModalCardContent title={title} onClose={onClose} footer={footer}>
+        {children}
+      </ModalCardContent>
+    </SafeAreaProvider>
+  );
+}
+
+function ModalCardContent({
+  title,
+  onClose,
+  children,
+  footer,
+}: {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+  footer?: ReactNode;
+}) {
+  const insets = useSafeAreaInsets();
+
+  return (
     <View style={styles.modalBackdrop}>
-      <View style={styles.modalCard}>
+      <View style={[styles.modalCard, { paddingBottom: Math.max(32, insets.bottom + 20) }]}>
         <View style={styles.modalHeader}>
           <Text style={styles.modalTitle}>{title}</Text>
           <Pressable onPress={onClose}>
@@ -2276,6 +2396,7 @@ function ModalCard({
         <ScrollView contentContainerStyle={styles.modalScrollContent} showsVerticalScrollIndicator={false}>
           {children}
         </ScrollView>
+        {footer ? <View style={styles.modalFooter}>{footer}</View> : null}
       </View>
     </View>
   );
@@ -2285,81 +2406,55 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: '#eaf1f6',
-    paddingTop: 8,
   },
-  hero: {
+  pageHeader: {
+    minHeight: 56,
+    justifyContent: 'center',
     paddingHorizontal: 20,
-    paddingTop: 18,
-    paddingBottom: 10,
-    borderBottomLeftRadius: 28,
-    borderBottomRightRadius: 28,
+    backgroundColor: '#ffffff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#dbe7ef',
   },
-  heroEyebrow: {
-    color: '#d3eef7',
-    fontSize: 12,
-    letterSpacing: 1.5,
-    fontWeight: '700',
-  },
-  heroTitle: {
-    marginTop: 10,
-    color: '#ffffff',
-    fontSize: 27,
-    lineHeight: 34,
+  pageHeaderTitle: {
+    color: '#153047',
+    fontSize: 20,
     fontWeight: '800',
-  },
-  heroMetrics: {
-    flexDirection: 'row',
-    gap: 10,
-    marginTop: 0,
-  },
-  metricBadge: {
-    flex: 1,
-    backgroundColor: 'rgba(255,255,255,0.16)',
-    borderRadius: 18,
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-  },
-  metricBadgeLabel: {
-    color: '#d9f7ff',
-    fontSize: 12,
-  },
-  metricBadgeValue: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '800',
-    marginTop: 3,
   },
   shell: {
     flex: 1,
-    marginTop: -8,
   },
   tabBar: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    paddingHorizontal: 14,
-    paddingTop: 10,
+    alignItems: 'flex-start',
+    backgroundColor: '#ffffff',
+    borderTopWidth: 1,
+    borderTopColor: '#dbe7ef',
+    paddingHorizontal: 8,
+    paddingTop: 8,
+    paddingBottom: 12,
   },
   tabButton: {
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 14,
-    backgroundColor: '#d9e5ef',
+    flex: 1,
+    minHeight: 56,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 3,
+    borderRadius: 8,
   },
   tabButtonActive: {
-    backgroundColor: '#123c69',
+    backgroundColor: '#e7f0ff',
   },
   tabButtonText: {
-    color: '#35506a',
-    fontSize: 11,
+    color: '#688096',
+    fontSize: 10,
     fontWeight: '800',
   },
   tabButtonTextActive: {
-    color: '#ffffff',
+    color: '#123c69',
   },
   content: {
     padding: 12,
-    paddingBottom: 40,
+    paddingBottom: 24,
     gap: 12,
   },
   grid: {
@@ -2526,12 +2621,7 @@ const styles = StyleSheet.create({
   },
   actionHeader: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    gap: 12,
-  },
-  actionHeaderTextBlock: {
-    flex: 1,
+    justifyContent: 'flex-end',
   },
   primaryButton: {
     backgroundColor: '#123c69',
@@ -2549,6 +2639,21 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontWeight: '800',
     fontSize: 13,
+  },
+  destructiveButton: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 10,
+    paddingVertical: 11,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e6a4ad',
+    backgroundColor: '#fff2f3',
+  },
+  destructiveButtonText: {
+    color: '#b83d4b',
+    fontSize: 13,
+    fontWeight: '800',
   },
   calendarMonthHeader: {
     flexDirection: 'row',
@@ -2641,6 +2746,9 @@ const styles = StyleSheet.create({
     marginTop: 12,
     borderTopWidth: 1,
     borderColor: '#e1ebf2',
+  },
+  dayLessonList: {
+    gap: 10,
   },
   dayScheduleRow: {
     flexDirection: 'row',
@@ -2978,6 +3086,37 @@ const styles = StyleSheet.create({
   modalScrollContent: {
     paddingBottom: 16,
   },
+  modalFooter: {
+    borderTopWidth: 1,
+    borderTopColor: '#e1ebf2',
+    paddingTop: 12,
+  },
+  lessonEditorFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  lessonEditorFooterMain: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  destructiveFooterButton: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 40,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e6a4ad',
+    backgroundColor: '#fff2f3',
+    paddingHorizontal: 12,
+  },
+  destructiveFooterButtonText: {
+    color: '#b83d4b',
+    fontSize: 12,
+    fontWeight: '800',
+  },
   modalTitle: {
     color: '#163149',
     fontSize: 21,
@@ -3042,6 +3181,12 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '700',
     marginBottom: 8,
+  },
+  conflictDetailText: {
+    color: '#b83d4b',
+    fontSize: 12,
+    lineHeight: 17,
+    marginBottom: 4,
   },
   freeTimeText: {
     color: '#208455',

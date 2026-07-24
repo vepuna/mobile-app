@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "main": "index.ts",
   "dependencies": {
+    "@expo/vector-icons": "^15.0.2",
     "@react-native-async-storage/async-storage": "^3.1.1",
     "expo": "~56.0.12",
     "expo-constants": "~56.0.18",
@@ -15,6 +16,7 @@
     "react-dom": "19.2.3",
     "react-native": "0.85.3",
     "react-native-android-widget": "^0.20.3",
+    "react-native-safe-area-context": "~5.7.0",
     "react-native-web": "^0.21.2"
   },
   "devDependencies": {

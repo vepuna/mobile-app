@@ -3,7 +3,7 @@ export type ScreenTab = 'dashboard' | 'schedule' | 'students' | 'finances' | 'se
 export type AppLanguage = 'en-US' | 'ru-RU';
 export type AppCurrency = 'USD' | 'EUR' | 'RUB' | 'MDL';
 
-export type LessonStatus = 'scheduled' | 'completed' | 'cancelled' | 'rescheduled';
+export type LessonStatus = 'scheduled' | 'completed' | 'completed_paid' | 'cancelled' | 'rescheduled';
 export type PaymentKind = 'payment' | 'prepayment';
 export type NotificationPermissionState = 'unknown' | 'granted' | 'denied' | 'unsupported';
 
@@ -39,7 +39,8 @@ export type Lesson = {
 
 export type Payment = {
   id: string;
-  studentId: string;
+  studentId: string | null;
+  lessonId?: string | null;
   amount: number;
   paidAt: string;
   kind: PaymentKind;
@@ -88,6 +89,7 @@ export type LessonDraft = {
   lessonDate: string;
   lessonTime: string;
   durationMinutes: string;
+  anonymousPrice: string;
   status: LessonStatus;
   studentIds: string[];
   note: string;
