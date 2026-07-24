@@ -30,15 +30,17 @@ import {
   formatMonthYear,
   formatShortDate,
   isValidLessonDraft,
+  getVisibleLessons,
   parseLessonStart,
   sortLessons,
 } from './src/domain/selectors';
-import { syncReminderAutomation, type ReminderAutomationStatus } from './src/services/reminders';
+import { sendTestNotification, syncReminderAutomation, type ReminderAutomationStatus } from './src/services/reminders';
 import {
   type AppCurrency,
   type AppData,
   type AppLanguage,
   type AppSettings,
+  type ArchiveLessonVisibility,
   type Lesson,
   type LessonDraft,
   type Payment,
@@ -53,6 +55,8 @@ const initialAutomationStatus: ReminderAutomationStatus & { widgetSyncedAt: stri
   notificationPermission: 'unknown',
   expoPushToken: '',
   pushTokenHint: 'Разрешения на уведомления еще не проверены.',
+  firebaseConfigured: null,
+  tokenReady: false,
   scheduledLessonReminderCount: 0,
   lowBalanceReminderScheduled: false,
   widgetSyncedAt: null,
@@ -75,7 +79,7 @@ const TAB_ICONS: Record<ScreenTab, keyof typeof Ionicons.glyphMap> = {
   settings: 'settings-outline',
 };
 
-type PaymentStatus = 'paid' | 'partial' | 'outstanding';
+type PaymentStatus = 'paid' | 'partial' | 'outstanding' | 'unpaid';
 
 type RecurrenceDraft = {
   enabled: boolean;
@@ -230,12 +234,25 @@ function normalizeStoredStudents(students: Student[]): Student[] {
       ? student.color
       : createStudentColor(usedColors);
     usedColors.add(color);
-    return { ...student, color };
+    return { ...student, color, archiveLessonVisibility: student.archiveLessonVisibility ?? 'upcoming' };
   });
 }
 
 function formatPaymentKindLabel(kind: Payment['kind']): string {
   return kind === 'prepayment' ? 'Предоплата' : 'Оплата';
+}
+
+function formatPaymentStatusLabel(status: PaymentStatus): string {
+  if (status === 'paid') {
+    return 'Оплачено';
+  }
+  if (status === 'partial') {
+    return 'Частично оплачено';
+  }
+  if (status === 'unpaid') {
+    return 'Не оплачен';
+  }
+  return 'Есть долг';
 }
 
 function formatPermissionLabel(state: ReminderAutomationStatus['notificationPermission']): string {
@@ -287,6 +304,11 @@ export default function App() {
   const [rescheduleDate, setRescheduleDate] = useState(toDateToken(new Date()));
   const [rescheduleTime, setRescheduleTime] = useState('16:00');
   const [deleteConfirmationLessonId, setDeleteConfirmationLessonId] = useState<string | null>(null);
+  const [studentListMode, setStudentListMode] = useState<'active' | 'archived'>('active');
+  const [archiveStudentId, setArchiveStudentId] = useState<string | null>(null);
+  const [archiveLessonVisibility, setArchiveLessonVisibility] = useState<ArchiveLessonVisibility>('upcoming');
+  const [deleteStudentId, setDeleteStudentId] = useState<string | null>(null);
+  const [clearFutureScheduleStudentId, setClearFutureScheduleStudentId] = useState<string | null>(null);
   const [automationStatus, setAutomationStatus] = useState(initialAutomationStatus);
 
   useEffect(() => {
@@ -358,13 +380,10 @@ export default function App() {
     [data.students],
   );
   const activeStudents = useMemo(() => data.students.filter((student) => !student.isArchived), [data.students]);
-  const activeStudentIds = useMemo(() => new Set(activeStudents.map((student) => student.id)), [activeStudents]);
+  const archivedStudents = useMemo(() => data.students.filter((student) => student.isArchived), [data.students]);
   const activeLessons = useMemo(
-    () =>
-      data.lessons.filter(
-        (lesson) => lesson.studentIds.length === 0 || lesson.studentIds.some((studentId) => activeStudentIds.has(studentId)),
-      ),
-    [activeStudentIds, data.lessons],
+    () => getVisibleLessons(data, new Date()),
+    [data],
   );
   const scheduledLessons = useMemo(
     () => activeLessons.filter((lesson) => lesson.status !== 'rescheduled'),
@@ -394,10 +413,10 @@ export default function App() {
       Object.fromEntries(
         activeStudents.map((student) => [
           student.id,
-          calculateBalance(student, activeLessons, data.payments),
+          calculateBalance(student, data.lessons, data.payments),
         ]),
       ),
-    [activeLessons, activeStudents, data.payments],
+    [activeStudents, data.lessons, data.payments],
   );
   const financeStudentIds = selectedFinanceStudentId
     ? [selectedFinanceStudentId]
@@ -437,7 +456,7 @@ export default function App() {
         const totalPaid = data.payments
           .filter((payment) => payment.studentId === student.id)
           .reduce((total, payment) => total + payment.amount, 0);
-        const remaining = Math.max(totalDue - totalPaid, 0);
+        const remaining = Math.max(-calculateBalance(student, data.lessons, data.payments), 0);
         const studentPayments = data.payments
           .filter((payment) => payment.studentId === student.id)
           .sort((left, right) => right.paidAt.localeCompare(left.paidAt));
@@ -452,7 +471,7 @@ export default function App() {
         )[0]?.startAt;
 
         const lessonCoverage = new Map<string, PaymentStatus>();
-        let remainingPayments = Math.max(totalPaid, 0);
+        let remainingPayments = Math.max(student.openingBalance + totalPaid, 0);
         for (const lesson of doneLessons) {
           if (remainingPayments >= lesson.costPerStudent) {
             lessonCoverage.set(lesson.id, 'paid');
@@ -465,14 +484,29 @@ export default function App() {
           }
         }
 
+        const upcomingLessons = sortLessons(
+          activeLessons.filter(
+            (lesson) =>
+              lesson.status === 'scheduled' &&
+              lesson.studentIds.includes(student.id) &&
+              new Date(lesson.startAt).getTime() > Date.now(),
+          ),
+        );
+        for (const lesson of upcomingLessons) {
+          if (remainingPayments >= lesson.costPerStudent) {
+            lessonCoverage.set(lesson.id, 'paid');
+            remainingPayments -= lesson.costPerStudent;
+          } else {
+            lessonCoverage.set(lesson.id, 'unpaid');
+          }
+        }
+
         const status: PaymentStatus =
-          doneLessons.length === 0
+          remaining > 0
             ? 'outstanding'
-            : remaining <= 0
-            ? 'paid'
-            : totalPaid > 0
-            ? 'partial'
-            : 'outstanding';
+            : upcomingLessons.some((lesson) => lessonCoverage.get(lesson.id) === 'unpaid')
+            ? 'unpaid'
+            : 'paid';
 
         return [
           student.id,
@@ -488,7 +522,7 @@ export default function App() {
         ];
       }),
     );
-  }, [activeLessons, activeStudents, data.payments]);
+  }, [activeLessons, activeStudents, data.lessons, data.payments]);
   const todayDateToken = toDateToken(new Date());
   const todayLessons = useMemo(
     () => sortLessons(lessonsByDate[todayDateToken] ?? []),
@@ -499,8 +533,15 @@ export default function App() {
       todayLessons.map((lesson) => {
         const studentId = lesson.studentIds[0];
         const overview = studentId ? studentPaymentOverview[studentId] : undefined;
+        const coveredStatus = overview?.lessonCoverage?.get(lesson.id);
         const lessonPaymentStatus: PaymentStatus =
-          lesson.status === 'completed' ? overview?.lessonCoverage?.get(lesson.id) ?? 'outstanding' : 'outstanding';
+          lesson.status === 'completed_paid'
+            ? 'paid'
+            : lesson.status === 'completed'
+            ? coveredStatus === 'paid'
+              ? 'paid'
+              : 'outstanding'
+            : coveredStatus ?? 'unpaid';
         return {
           key: lesson.id,
           lessonTitle: lesson.title,
@@ -564,7 +605,8 @@ export default function App() {
       openingBalance: Number(studentDraft.openingBalance) || 0,
       defaultRate: Number(studentDraft.defaultRate) || 0,
       color: existingStudent?.color ?? createStudentColor(data.students.map((student) => student.color)),
-      isArchived: studentDraft.isArchived,
+      isArchived: existingStudent?.isArchived ?? false,
+      archiveLessonVisibility: existingStudent?.archiveLessonVisibility ?? 'upcoming',
     };
 
     setData((current) => {
@@ -1015,13 +1057,56 @@ export default function App() {
     }
   };
 
-  const toggleStudentArchive = (studentId: string) => {
+  const archiveStudent = (studentId: string, visibility: ArchiveLessonVisibility) => {
     setData((current) => ({
       ...current,
       students: current.students.map((student) =>
-        student.id === studentId ? { ...student, isArchived: !student.isArchived } : student,
+        student.id === studentId
+          ? { ...student, isArchived: true, archiveLessonVisibility: visibility }
+          : student,
       ),
     }));
+  };
+
+  const restoreStudent = (studentId: string) => {
+    setData((current) => ({
+      ...current,
+      students: current.students.map((student) =>
+        student.id === studentId ? { ...student, isArchived: false } : student,
+      ),
+    }));
+  };
+
+  const confirmStudentDeletion = () => {
+    if (!deleteStudentId) {
+      return;
+    }
+
+    const studentId = deleteStudentId;
+    setData((current) => ({
+      ...current,
+      students: current.students.filter((student) => student.id !== studentId),
+      lessons: current.lessons.filter((lesson) => !lesson.studentIds.includes(studentId)),
+      payments: current.payments.filter((payment) => payment.studentId !== studentId),
+    }));
+    setDeleteStudentId(null);
+  };
+
+  const clearFutureSchedule = () => {
+    if (!clearFutureScheduleStudentId) {
+      return;
+    }
+
+    const studentId = clearFutureScheduleStudentId;
+    const today = toDateToken(new Date());
+    setData((current) => ({
+      ...current,
+      lessons: current.lessons.filter(
+        (lesson) => !(lesson.studentIds.includes(studentId) && lesson.startAt.slice(0, 10) >= today),
+      ),
+    }));
+    setClearFutureScheduleStudentId(null);
+    closeStudentModal();
   };
 
   const updateSettings = (patch: Partial<AppSettings>) => {
@@ -1040,6 +1125,11 @@ export default function App() {
       ...current,
       ...reminderStatus,
     }));
+  };
+
+  const testNotifications = async () => {
+    const result = await sendTestNotification();
+    Alert.alert(result.success ? 'Проверка выполнена' : 'Не удалось проверить', result.message);
   };
 
   const tabLabels: Record<ScreenTab, string> = {
@@ -1106,10 +1196,12 @@ export default function App() {
                                 ? styles.statusPaid
                                 : entry.status === 'partial'
                                 ? styles.statusPartial
+                                : entry.status === 'unpaid'
+                                ? styles.statusUnpaid
                                 : styles.statusOutstanding,
                             ]}
                           >
-                            {entry.status === 'paid' ? 'Оплачено' : entry.status === 'partial' ? 'Частично оплачено' : 'Есть долг'}
+                              {formatPaymentStatusLabel(entry.status)}
                           </Text>
                           <Text style={styles.financeMeta}>
                             {entry.completionStatus === 'completed'
@@ -1123,6 +1215,29 @@ export default function App() {
                         </View>
                       </View>
                     ))
+                )}
+              </SectionCard>
+
+              <SectionCard title="Ближайшие уроки">
+                {dashboard.upcomingLessons.length === 0 ? (
+                  <Text style={styles.noteText}>Ближайших запланированных уроков нет.</Text>
+                ) : (
+                  dashboard.upcomingLessons.slice(0, data.settings.upcomingLessonsToDisplay).map((lesson) => {
+                    const studentId = lesson.studentIds[0];
+                    const student = studentId ? studentsById[studentId] : undefined;
+                    return (
+                      <View key={`upcoming-${lesson.id}`} style={styles.paymentRow}>
+                        <View style={styles.upcomingLessonDetails}>
+                          <View style={styles.calendarLessonTitleRow}>
+                            <View style={[styles.calendarDot, { backgroundColor: student?.color ?? ANONYMOUS_LESSON_COLOR }]} />
+                            <Text style={styles.financeName}>{student?.name ?? 'Анонимный'}</Text>
+                          </View>
+                          <Text style={styles.financeMeta}>{formatShortDate(lesson.startAt, 'ru-RU')} · {formatLessonTime(lesson.startAt)}</Text>
+                        </View>
+                        <Text style={styles.statusBadge}>{formatLessonStatusLabel(lesson.status)}</Text>
+                      </View>
+                    );
+                  })
                 )}
               </SectionCard>
 
@@ -1252,7 +1367,11 @@ export default function App() {
                 actionLabel="Добавить ученика"
                 onAction={() => openStudentEditor()}
               />
-              {data.students.map((student) => (
+              <View style={styles.chipWrap}>
+                <Pill label={`Активные (${activeStudents.length})`} selected={studentListMode === 'active'} onPress={() => setStudentListMode('active')} />
+                <Pill label={`Архив (${archivedStudents.length})`} selected={studentListMode === 'archived'} onPress={() => setStudentListMode('archived')} />
+              </View>
+              {studentListMode === 'active' ? activeStudents.map((student) => (
                 <SectionCard
                   key={student.id}
                   title={student.name}
@@ -1277,16 +1396,12 @@ export default function App() {
                         styles.statusBadge,
                         studentPaymentOverview[student.id]?.status === 'paid'
                           ? styles.statusPaid
-                          : studentPaymentOverview[student.id]?.status === 'partial'
-                          ? styles.statusPartial
+                          : studentPaymentOverview[student.id]?.status === 'unpaid'
+                          ? styles.statusUnpaid
                           : styles.statusOutstanding,
                       ]}
                     >
-                      {studentPaymentOverview[student.id]?.status === 'paid'
-                        ? 'Оплачено'
-                        : studentPaymentOverview[student.id]?.status === 'partial'
-                        ? 'Частично оплачено'
-                        : 'Есть долг'}
+                      {formatPaymentStatusLabel(studentPaymentOverview[student.id]?.status ?? 'paid')}
                     </Text>
                     <RowLabelValue
                       label="Всего начислено"
@@ -1338,13 +1453,35 @@ export default function App() {
                   <View style={styles.inlineActions}>
                     <SmallAction label="Редактировать" onPress={() => openStudentEditor(student)} />
                     <SmallAction
-                      label={student.isArchived ? 'Восстановить' : 'В архив'}
-                      onPress={() => toggleStudentArchive(student.id)}
+                      label="В архив"
+                      onPress={() => {
+                        setArchiveStudentId(student.id);
+                        setArchiveLessonVisibility('upcoming');
+                      }}
                     />
                     <SmallAction label="Оплата" onPress={() => openPaymentEditor(student.id)} />
                   </View>
                 </SectionCard>
-              ))}
+              )) : archivedStudents.length === 0 ? (
+                <Text style={styles.noteText}>В архиве пока нет учеников.</Text>
+              ) : (
+                archivedStudents.map((student) => (
+                  <SectionCard
+                    key={student.id}
+                    title={student.name}
+                    subtitle={`${student.subject || 'Предмет не указан'} • ${student.phone || 'Телефон не указан'}`}
+                  >
+                    <RowLabelValue
+                      label="Скрытые уроки"
+                      value={student.archiveLessonVisibility === 'all' ? 'Все уроки' : 'Будущие уроки'}
+                    />
+                    <View style={styles.inlineActions}>
+                      <SmallAction label="Восстановить" onPress={() => restoreStudent(student.id)} />
+                      <SmallAction label="Удалить навсегда" onPress={() => setDeleteStudentId(student.id)} />
+                    </View>
+                  </SectionCard>
+                ))
+              )}
             </>
           ) : null}
 
@@ -1390,16 +1527,12 @@ export default function App() {
                             styles.statusBadge,
                             overview?.status === 'paid'
                               ? styles.statusPaid
-                              : overview?.status === 'partial'
-                              ? styles.statusPartial
+                              : overview?.status === 'unpaid'
+                              ? styles.statusUnpaid
                               : styles.statusOutstanding,
                           ]}
                         >
-                          {overview?.status === 'paid'
-                            ? 'Оплачено'
-                            : overview?.status === 'partial'
-                            ? 'Частично оплачено'
-                            : 'Есть долг'}
+                          {formatPaymentStatusLabel(overview?.status ?? 'paid')}
                         </Text>
                         <Text style={styles.financeBalance}>
                           {formatCurrency(overview?.remaining ?? 0, currencyFormatter)}
@@ -1467,8 +1600,36 @@ export default function App() {
                 </View>
               </SectionCard>
 
+              <SectionCard title="Ближайшие уроки">
+                <Text style={styles.fieldLabel}>Показывать уроков</Text>
+                <View style={styles.chipWrap}>
+                  {[3, 5, 10, 20].map((count) => (
+                    <Pill
+                      key={count}
+                      label={String(count)}
+                      selected={data.settings.upcomingLessonsToDisplay === count}
+                      onPress={() => updateSettings({ upcomingLessonsToDisplay: count })}
+                    />
+                  ))}
+                </View>
+                <Field
+                  label="Своё значение"
+                  value={String(data.settings.upcomingLessonsToDisplay)}
+                  onChangeText={(value) =>
+                    updateSettings({ upcomingLessonsToDisplay: Math.min(100, Math.max(1, Number(value) || 1)) })
+                  }
+                  placeholder="5"
+                  keyboardType="numeric"
+                />
+              </SectionCard>
+
               <SectionCard title="Напоминания">
                 <RowLabelValue label="Доступ к уведомлениям" value={formatPermissionLabel(automationStatus.notificationPermission)} />
+                <RowLabelValue
+                  label="Firebase Android"
+                  value={automationStatus.firebaseConfigured === null ? 'Не требуется' : automationStatus.firebaseConfigured ? 'Настроен' : 'Не настроен'}
+                />
+                <RowLabelValue label="Токен удаленных push" value={automationStatus.tokenReady ? 'Получен' : 'Не получен'} />
                 <RowLabelValue
                   label="Напоминания об уроках"
                   value={String(automationStatus.scheduledLessonReminderCount)}
@@ -1481,7 +1642,12 @@ export default function App() {
                   <Text style={styles.switchLabel}>Напоминания об уроках</Text>
                   <Switch
                     value={data.settings.lessonRemindersEnabled}
-                    onValueChange={(value) => updateSettings({ lessonRemindersEnabled: value })}
+                    onValueChange={(value) => {
+                      updateSettings({ lessonRemindersEnabled: value });
+                      if (value) {
+                        void enableNotificationsAndPush();
+                      }
+                    }}
                   />
                 </View>
                 <Field
@@ -1517,6 +1683,7 @@ export default function App() {
                 ) : null}
                 <View style={styles.inlineActions}>
                   <SmallAction label="Включить уведомления" onPress={() => void enableNotificationsAndPush()} />
+                  <SmallAction label="Тестовое уведомление" onPress={() => void testNotifications()} />
                 </View>
               </SectionCard>
             </>
@@ -1598,20 +1765,113 @@ export default function App() {
             placeholder="45"
             keyboardType="numeric"
           />
-          <View style={styles.switchRow}>
-            <Text style={styles.switchLabel}>Архивировать ученика</Text>
-            <Switch
-              value={studentDraft.isArchived}
-              onValueChange={(value) => setStudentDraft((current) => ({ ...current, isArchived: value }))}
-            />
-          </View>
           <TextArea
             label="Заметки"
             value={studentDraft.notes}
             onChangeText={(value) => setStudentDraft((current) => ({ ...current, notes: value }))}
             placeholder="Цели, удобное время, комментарии"
           />
+          {editingStudentId ? (
+            <View style={styles.inlineActions}>
+              <SmallAction label="Очистить будущее расписание" onPress={() => setClearFutureScheduleStudentId(editingStudentId)} />
+              {!data.students.find((student) => student.id === editingStudentId)?.isArchived ? (
+                <SmallAction
+                  label="В архив"
+                  onPress={() => {
+                    setArchiveStudentId(editingStudentId);
+                    setArchiveLessonVisibility('upcoming');
+                  }}
+                />
+              ) : null}
+            </View>
+          ) : null}
           <PrimaryButton label="Сохранить ученика" onPress={upsertStudent} />
+        </ModalCard>
+      </Modal>
+
+      <Modal
+        visible={archiveStudentId !== null}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setArchiveStudentId(null)}
+      >
+        <ModalCard
+          title="Архивировать ученика"
+          onClose={() => setArchiveStudentId(null)}
+          footer={
+            <View style={styles.lessonEditorFooter}>
+              <SmallAction label="Отмена" onPress={() => setArchiveStudentId(null)} />
+              <PrimaryButton
+                label="Архивировать"
+                compact
+                onPress={() => {
+                  if (archiveStudentId) {
+                    archiveStudent(archiveStudentId, archiveLessonVisibility);
+                  }
+                  setArchiveStudentId(null);
+                  closeStudentModal();
+                }}
+              />
+            </View>
+          }
+        >
+          <Text style={styles.supportText}>Уроки сохраняются и будут восстановлены вместе с учеником.</Text>
+          <View style={styles.chipWrap}>
+            <Pill
+              label="Скрыть будущие уроки"
+              selected={archiveLessonVisibility === 'upcoming'}
+              onPress={() => setArchiveLessonVisibility('upcoming')}
+            />
+            <Pill
+              label="Скрыть все уроки"
+              selected={archiveLessonVisibility === 'all'}
+              onPress={() => setArchiveLessonVisibility('all')}
+            />
+          </View>
+        </ModalCard>
+      </Modal>
+
+      <Modal
+        visible={clearFutureScheduleStudentId !== null}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setClearFutureScheduleStudentId(null)}
+      >
+        <ModalCard
+          title="Очистить будущее расписание?"
+          onClose={() => setClearFutureScheduleStudentId(null)}
+          footer={
+            <View style={styles.lessonEditorFooter}>
+              <SmallAction label="Отмена" onPress={() => setClearFutureScheduleStudentId(null)} />
+              <Pressable style={styles.destructiveFooterButton} onPress={clearFutureSchedule}>
+                <Text style={styles.destructiveFooterButtonText}>Очистить</Text>
+              </Pressable>
+            </View>
+          }
+        >
+          <Text style={styles.supportText}>Будут удалены все уроки этого ученика, начиная с сегодняшнего дня. Прошедшие уроки останутся без изменений.</Text>
+        </ModalCard>
+      </Modal>
+
+      <Modal
+        visible={deleteStudentId !== null}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setDeleteStudentId(null)}
+      >
+        <ModalCard
+          title="Удалить ученика навсегда?"
+          onClose={() => setDeleteStudentId(null)}
+          footer={
+            <View style={styles.lessonEditorFooter}>
+              <SmallAction label="Отмена" onPress={() => setDeleteStudentId(null)} />
+              <Pressable style={styles.destructiveFooterButton} onPress={confirmStudentDeletion}>
+                <Text style={styles.destructiveFooterButtonText}>Удалить</Text>
+              </Pressable>
+            </View>
+          }
+        >
+          <Text style={styles.supportText}>Будут удалены ученик, его уроки и платежи. Это действие нельзя отменить.</Text>
         </ModalCard>
       </Modal>
 
@@ -2989,6 +3249,9 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
     gap: 8,
   },
+  upcomingLessonDetails: {
+    flex: 1,
+  },
   todayLessonStatusWrap: {
     alignItems: 'flex-end',
     gap: 4,
@@ -3027,6 +3290,10 @@ const styles = StyleSheet.create({
   statusPartial: {
     backgroundColor: '#fff3df',
     color: '#b86c17',
+  },
+  statusUnpaid: {
+    backgroundColor: '#e7f0ff',
+    color: '#1d5fcf',
   },
   statusOutstanding: {
     backgroundColor: '#fde8ea',

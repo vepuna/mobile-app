@@ -139,3 +139,136 @@ Buttons must never be partially hidden or difficult to press.
 Review the entire application and apply this consistently to every screen and every modal, rather than fixing only individual pages.
 
 The goal is for every important action to remain fully visible and easily accessible on all Android devices, regardless of whether the user is using gesture navigation or the classic three-button navigation.
+
+---
+
+# Statistics, Payment Logic, Notifications & Archive Improvements
+
+## 1. Upcoming Lessons Block in Statistics
+
+Add a new block to the Statistics page that displays a list of upcoming lessons.
+
+Requirements:
+
+- Show lessons in chronological order.
+- Each item should include:
+	- student name (or Anonymous);
+	- lesson date;
+	- lesson time;
+	- lesson status;
+	- student color indicator.
+- The number of displayed lessons must be configurable in Settings.
+- Add a setting such as:
+	- "Upcoming lessons to display";
+	- options: 3, 5, 10, 20, or custom value.
+- The widget should update automatically when lessons are created, edited, deleted, or rescheduled.
+
+This block should provide a quick overview of the nearest scheduled lessons.
+
+## 2. Correct Debt Calculation Logic
+
+The current payment logic is incorrect.
+
+Current behavior:
+
+- A debt is created as soon as a lesson is scheduled, even if it has not yet been conducted.
+
+Expected behavior:
+
+- A debt should be created only when the lesson has been completed.
+- After a lesson is marked Completed, check the student balance:
+	- if the balance fully covers the lesson cost, deduct the amount and create no debt;
+	- if the balance is insufficient, deduct the available amount and create a debt for the remaining amount;
+	- if the balance is zero, create a debt for the full lesson cost.
+
+Important:
+
+- Future scheduled lessons must never create debt.
+- Cancelled lessons must never create debt.
+- Rescheduled lessons must never create debt.
+- Debt should represent only unpaid completed lessons.
+
+This makes the financial logic much more intuitive and closer to real tutoring workflows.
+
+## 3. Notification System Validation
+
+The notification setup currently fails with the following error:
+
+"Unable to get firebase messaging instance / Did you configure googleServicesFile in app config? Make sure to ..."
+
+Requirements:
+
+- Add a notification diagnostics/check section in Settings.
+- When the user enables notifications:
+	- verify Firebase configuration;
+	- verify permission status;
+	- verify token generation;
+	- display a clear success or failure message.
+- Replace the raw technical Firebase error with a user-friendly explanation.
+- Add a "Test Notification" button that sends a local or push test notification so the user can confirm notifications are working correctly.
+
+The user should be able to validate the notification system without needing developer knowledge.
+
+# Student Archive Improvements
+
+## 4. Archive Options
+
+When archiving a student, display a choice dialog.
+
+Options:
+
+- Hide upcoming lessons.
+- Hide all lessons.
+
+Behavior:
+
+- Hide upcoming lessons:
+	- remove only future lessons from the calendar;
+	- keep all past completed lessons visible in the calendar and history.
+- Hide all lessons:
+	- remove both past and future lessons from the calendar and active views.
+
+Default option:
+
+- Hide upcoming lessons.
+
+This is the most practical behavior because teachers often need to keep a history of completed lessons even after a student stops studying.
+
+## 5. Archived Students Tab
+
+Improve the students screen organization.
+
+Requirements:
+
+- Add a separate Archived Students tab.
+- Archived students should be moved there automatically.
+- The main students list should contain only active students.
+- From the archived tab, the user should be able to:
+	- restore a student;
+	- permanently delete a student (optional confirmation).
+
+This prevents the main list from becoming cluttered.
+
+## 6. Calendar Behavior for Archived Students
+
+When a student is archived:
+
+- remove only future lessons from the calendar by default;
+- keep all past lessons visible for historical reference;
+- restoring the student should restore all hidden future lessons exactly as they were before archiving.
+
+This preserves lesson history while keeping the active calendar clean.
+
+## 7. Clear Future Schedule for a Student
+
+Add a quick cleanup action for students who have finished studying.
+
+Requirements:
+
+- In the Edit Student screen, add a button: "Clear Future Schedule".
+- Pressing it should:
+	- delete all lessons for that student starting from today onward;
+	- leave all past lessons untouched.
+- Display a confirmation dialog before performing the action.
+
+This allows teachers to stop a student's recurring schedule instantly without manually deleting each future lesson from the calendar.

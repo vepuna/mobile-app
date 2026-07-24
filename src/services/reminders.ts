@@ -2,7 +2,7 @@ import Constants from 'expo-constants';
 import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
-import { calculateBalance, sortLessons } from '../domain/selectors';
+import { calculateBalance, getVisibleLessons, sortLessons } from '../domain/selectors';
 import { type AppData, type NotificationPermissionState } from '../domain/types';
 
 const REMINDER_CHANNEL_ID = 'tutor-reminders';
@@ -11,8 +11,15 @@ export type ReminderAutomationStatus = {
   notificationPermission: NotificationPermissionState;
   expoPushToken: string;
   pushTokenHint: string;
+  firebaseConfigured: boolean | null;
+  tokenReady: boolean;
   scheduledLessonReminderCount: number;
   lowBalanceReminderScheduled: boolean;
+};
+
+export type NotificationTestResult = {
+  success: boolean;
+  message: string;
 };
 
 Notifications.setNotificationHandler({
@@ -24,12 +31,20 @@ Notifications.setNotificationHandler({
   }),
 });
 
-function getErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'Неизвестная ошибка';
-}
-
 function isPermissionGranted(settings: Notifications.NotificationPermissionsStatus): boolean {
   return settings.granted || settings.ios?.status === Notifications.IosAuthorizationStatus.PROVISIONAL;
+}
+
+function firebaseIsConfigured(): boolean {
+  return Boolean(Constants.expoConfig?.android?.googleServicesFile);
+}
+
+function friendlyPushTokenFailure(error: unknown): string {
+  const message = error instanceof Error ? error.message.toLowerCase() : '';
+  if (message.includes('firebase') || message.includes('google services') || message.includes('messaging instance')) {
+    return 'Удаленные push-уведомления не настроены: добавьте google-services.json в Android-конфигурацию и соберите новое приложение.';
+  }
+  return 'Не удалось получить токен удаленных push-уведомлений. Проверьте подключение к интернету и настройки push-уведомлений.';
 }
 
 async function ensureNotificationChannel(): Promise<void> {
@@ -54,6 +69,8 @@ export async function syncReminderAutomation(
       notificationPermission: 'unsupported',
       expoPushToken: '',
       pushTokenHint: 'Уведомления доступны только в сборке Android или iOS. Веб-версия не планирует нативные напоминания.',
+      firebaseConfigured: null,
+      tokenReady: false,
       scheduledLessonReminderCount: 0,
       lowBalanceReminderScheduled: false,
     };
@@ -78,6 +95,8 @@ export async function syncReminderAutomation(
       notificationPermission: 'denied',
       expoPushToken: '',
       pushTokenHint: 'Разрешите уведомления, чтобы включить напоминания об уроках и балансе.',
+      firebaseConfigured: Platform.OS === 'android' ? firebaseIsConfigured() : null,
+      tokenReady: false,
       scheduledLessonReminderCount: 0,
       lowBalanceReminderScheduled: false,
     };
@@ -85,15 +104,18 @@ export async function syncReminderAutomation(
 
   let expoPushToken = '';
   let pushTokenHint = 'Локальные напоминания включены.';
+  const firebaseConfigured = Platform.OS === 'android' ? firebaseIsConfigured() : null;
 
   if (Device.isDevice) {
     const projectId = Constants.expoConfig?.extra?.eas?.projectId ?? Constants.easConfig?.projectId;
-    if (projectId) {
+    if (Platform.OS === 'android' && !firebaseConfigured) {
+      pushTokenHint = 'Локальные напоминания работают. Для удаленных push-уведомлений добавьте google-services.json в Android-конфигурацию и соберите новое приложение.';
+    } else if (projectId) {
       try {
         expoPushToken = (await Notifications.getExpoPushTokenAsync({ projectId })).data;
         pushTokenHint = 'Токен Expo Push получен. Теперь можно подключить удаленные push-уведомления через backend.';
       } catch (error) {
-        pushTokenHint = `Сейчас не удалось получить токен удаленных push-уведомлений: ${getErrorMessage(error)}`;
+        pushTokenHint = friendlyPushTokenFailure(error);
       }
     } else {
       pushTokenHint = 'Локальные напоминания включены. Выполните EAS init/build, чтобы получить extra.eas.projectId для удаленных push-уведомлений.';
@@ -105,10 +127,7 @@ export async function syncReminderAutomation(
   await Notifications.cancelAllScheduledNotificationsAsync();
 
   let scheduledLessonReminderCount = 0;
-  const activeStudentIds = new Set(data.students.filter((student) => !student.isArchived).map((student) => student.id));
-  const activeLessons = data.lessons.filter(
-    (lesson) => lesson.studentIds.length === 0 || lesson.studentIds.some((studentId) => activeStudentIds.has(studentId)),
-  );
+  const activeLessons = getVisibleLessons(data, new Date());
 
   if (data.settings.lessonRemindersEnabled) {
     const reminderLeadMs = data.settings.reminderMinutesBeforeLesson * 60 * 1000;
@@ -170,7 +189,47 @@ export async function syncReminderAutomation(
     notificationPermission: 'granted',
     expoPushToken,
     pushTokenHint,
+    firebaseConfigured,
+    tokenReady: Boolean(expoPushToken),
     scheduledLessonReminderCount,
     lowBalanceReminderScheduled,
   };
+}
+
+export async function sendTestNotification(): Promise<NotificationTestResult> {
+  if (Platform.OS === 'web') {
+    return {
+      success: false,
+      message: 'Проверка уведомлений доступна только в сборке Android или iOS.',
+    };
+  }
+
+  try {
+    await ensureNotificationChannel();
+    const permissionSettings = await Notifications.getPermissionsAsync();
+    if (!isPermissionGranted(permissionSettings)) {
+      return {
+        success: false,
+        message: 'Разрешение на уведомления не выдано. Включите его в настройках приложения и повторите проверку.',
+      };
+    }
+
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: 'Проверка уведомлений',
+        body: 'Локальные уведомления работают корректно.',
+        sound: 'default',
+      },
+      trigger: null,
+    });
+    return {
+      success: true,
+      message: 'Тестовое локальное уведомление отправлено. Оно должно появиться сразу.',
+    };
+  } catch {
+    return {
+      success: false,
+      message: 'Не удалось отправить тестовое уведомление. Проверьте разрешение на уведомления и системные настройки устройства.',
+    };
+  }
 }

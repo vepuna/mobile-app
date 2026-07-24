@@ -41,6 +41,29 @@ export function calculateBalance(student: Student, lessons: Lesson[], payments: 
   return student.openingBalance + paid - lessonCharges;
 }
 
+export function isLessonVisibleForStudentArchive(student: Student, lesson: Lesson, now: Date): boolean {
+  if (!student.isArchived) {
+    return true;
+  }
+  if (student.archiveLessonVisibility === 'all') {
+    return false;
+  }
+
+  return lesson.status !== 'scheduled' || new Date(lesson.startAt).getTime() < now.getTime();
+}
+
+export function getVisibleLessons(data: AppData, now: Date): Lesson[] {
+  const studentsById = new Map(data.students.map((student) => [student.id, student]));
+
+  return data.lessons.filter((lesson) =>
+    lesson.studentIds.length === 0 ||
+    lesson.studentIds.some((studentId) => {
+      const student = studentsById.get(studentId);
+      return student ? isLessonVisibleForStudentArchive(student, lesson, now) : false;
+    }),
+  );
+}
+
 export function createNextWeekLesson(lesson: Lesson): Lesson {
   return {
     ...lesson,
@@ -65,10 +88,7 @@ export function moveDateIsoByDays(isoValue: string, dayShift: number): string {
 }
 
 export function deriveDashboard(data: AppData, now: Date) {
-  const activeStudentIds = new Set(data.students.filter((student) => !student.isArchived).map((student) => student.id));
-  const activeLessons = data.lessons.filter(
-    (lesson) => lesson.studentIds.length === 0 || lesson.studentIds.some((studentId) => activeStudentIds.has(studentId)),
-  );
+  const activeLessons = getVisibleLessons(data, now);
   const monthToken = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
   const balances = data.students
     .filter((student) => !student.isArchived)
@@ -183,17 +203,16 @@ export function formatMonthYear(isoValue: string, locale = 'ru-RU'): string {
 
 export function deriveWidgetSnapshot(data: AppData, now: Date): WidgetSnapshot {
   const dashboard = deriveDashboard(data, now);
-  const activeStudentIds = new Set(data.students.filter((student) => !student.isArchived).map((student) => student.id));
+  const visibleLessons = getVisibleLessons(data, now);
   const todayToken = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
     now.getDate(),
   ).padStart(2, '0')}`;
   const todayLessons = sortLessons(
-    data.lessons.filter(
+    visibleLessons.filter(
       (lesson) =>
         lesson.startAt.slice(0, 10) === todayToken &&
         lesson.status !== 'cancelled' &&
-        lesson.status !== 'rescheduled' &&
-        (lesson.studentIds.length === 0 || lesson.studentIds.some((studentId) => activeStudentIds.has(studentId))),
+        lesson.status !== 'rescheduled',
     ),
   );
   const lessonLines = todayLessons.slice(0, 4).map((lesson) => {

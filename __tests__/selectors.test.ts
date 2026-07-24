@@ -4,6 +4,7 @@ import {
   deriveDashboard,
   deriveWidgetSnapshot,
   findLessonConflicts,
+  getVisibleLessons,
   parseLessonStart,
 } from '../src/domain/selectors';
 import { type AppData } from '../src/domain/types';
@@ -96,6 +97,7 @@ const testData: AppData = {
     reminderMinutesBeforeLesson: 45,
     lowBalanceRemindersEnabled: true,
     lowBalanceThreshold: 20,
+    upcomingLessonsToDisplay: 5,
   },
 };
 
@@ -263,5 +265,37 @@ describe('tutor domain selectors', () => {
     const cancelledLesson = { ...testData.lessons[2], studentIds: ['student-alex'], status: 'cancelled' as const };
 
     expect(calculateBalance(alex, [unpaidCompleted, futureLesson, cancelledLesson], [])).toBe(-80);
+  });
+
+  it('keeps past lessons while hiding archived student upcoming lessons and restores them later', () => {
+    const archivedStudent = {
+      ...testData.students[0],
+      isArchived: true,
+      archiveLessonVisibility: 'upcoming' as const,
+    };
+    const completedPastLesson = { ...testData.lessons[0], status: 'completed' as const, startAt: '2026-06-25T16:00:00' };
+    const scheduledFutureLesson = { ...testData.lessons[0], id: 'lesson-future', startAt: '2026-06-27T16:00:00' };
+    const archivedData: AppData = {
+      ...testData,
+      students: [archivedStudent],
+      lessons: [completedPastLesson, scheduledFutureLesson],
+    };
+
+    expect(getVisibleLessons(archivedData, new Date('2026-06-26T08:00:00')).map((lesson) => lesson.id)).toEqual(['lesson-1']);
+
+    const restoredData: AppData = {
+      ...archivedData,
+      students: [{ ...archivedStudent, isArchived: false }],
+    };
+    expect(getVisibleLessons(restoredData, new Date('2026-06-26T08:00:00'))).toHaveLength(2);
+  });
+
+  it('uses available balance for completed lessons and never charges a future lesson', () => {
+    const student = { ...testData.students[0], openingBalance: 45 };
+    const completedLesson = { ...testData.lessons[0], status: 'completed' as const, costPerStudent: 45 };
+    const futureLesson = { ...testData.lessons[0], id: 'lesson-future', startAt: '2026-07-01T16:00:00' };
+
+    expect(calculateBalance(student, [completedLesson, futureLesson], [])).toBe(0);
+    expect(calculateBalance({ ...student, openingBalance: 20 }, [completedLesson, futureLesson], [])).toBe(-25);
   });
 });

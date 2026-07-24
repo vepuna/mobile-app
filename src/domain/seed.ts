@@ -13,6 +13,7 @@ export const seedAppData: AppData = {
     reminderMinutesBeforeLesson: 45,
     lowBalanceRemindersEnabled: true,
     lowBalanceThreshold: 20,
+    upcomingLessonsToDisplay: 5,
   },
 };
 

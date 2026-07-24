@@ -6,6 +6,7 @@ export type AppCurrency = 'USD' | 'EUR' | 'RUB' | 'MDL';
 export type LessonStatus = 'scheduled' | 'completed' | 'completed_paid' | 'cancelled' | 'rescheduled';
 export type PaymentKind = 'payment' | 'prepayment';
 export type NotificationPermissionState = 'unknown' | 'granted' | 'denied' | 'unsupported';
+export type ArchiveLessonVisibility = 'upcoming' | 'all';
 
 export type Student = {
   id: string;
@@ -20,6 +21,7 @@ export type Student = {
   defaultRate: number;
   color: string;
   isArchived: boolean;
+  archiveLessonVisibility?: ArchiveLessonVisibility;
 };
 
 export type Lesson = {
@@ -61,6 +63,7 @@ export type AppSettings = {
   reminderMinutesBeforeLesson: number;
   lowBalanceRemindersEnabled: boolean;
   lowBalanceThreshold: number;
+  upcomingLessonsToDisplay: number;
 };
 
 export type WidgetSnapshot = {
